@@ -7,9 +7,9 @@ results from a single assembly. Fifth tool in the [Clann suite](https://chriscre
 [Clann Pangenome Explorer](https://chriscreevey.github.io/clann-pangenome-explorer/), and
 [Clann eDNA Explorer](https://chriscreevey.github.io/clann-edna-explorer/).
 
-**Status: Phase 2 complete (streaming FASTA parsing + per-contig stats), under active development.** See
-[`clann-mag-explorer-brief.md`](clann-mag-explorer-brief.md) for the full design brief and
-[`docs/phase1-investigation.md`](docs/phase1-investigation.md) for the current investigation/planning notes.
+**Status: Phase 3 complete (streaming FASTA parsing + per-contig stats + marker-gene identification), under
+active development.** See [`clann-mag-explorer-brief.md`](clann-mag-explorer-brief.md) for the full design brief
+and [`docs/phase1-investigation.md`](docs/phase1-investigation.md) for the current investigation/planning notes.
 
 ## Architecture
 
@@ -21,8 +21,13 @@ results from a single assembly. Fifth tool in the [Clann suite](https://chriscre
   attaches itself to `self` (not `window`), so the same unmodified files load via `<script>` on the main thread
   and via `importScripts()` inside the worker.
 - `build/` holds an **offline, Node-based** build pipeline (not part of the zero-dependency deployed site) that
-  turns `reference-data/scg40_raw.fasta` into the static marker-gene search assets shipped in `data/`. See
-  `docs/phase1-investigation.md` §4-5 for what each script does and why it isn't run in the browser.
+  turns `reference-data/scg40_raw.fasta` into the static marker-gene search assets shipped in `data/`
+  (`node build/01-cluster.js && node build/02-index.js`, ~25s total). `data/*.bin` are committed — GitHub Pages
+  serves them directly, no CI build step. See `docs/phase1-investigation.md` §4-5 and "Phase 3 findings" for what
+  each script does, the binary formats, and the performance tuning behind the current parameters.
+- Marker-gene search (seed-and-extend against a Murphy10-reduced-alphabet index, BLOSUM62 extension, three
+  paralog-safety checks) runs inside the same Worker as parsing, reusing the six-frame translation
+  `contig-stats.js` already computes rather than recomputing it.
 - `test/` is a minimal zero-dependency harness (`node test/run.js`), matching the sibling tools.
 
 ## Repository layout

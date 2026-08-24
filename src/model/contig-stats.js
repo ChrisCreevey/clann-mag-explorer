@@ -152,7 +152,13 @@ function computeContigStats(seq) {
   const frames = translateSixFramesFromCodes(codes);
   const codingDensity = computeCodingDensity(frames);
 
-  return { length, gcContent, gcSkew, composition, codingDensity, ambiguousBaseCount: otherCount };
+  // `frames` is included so callers doing marker-gene search (Phase 3,
+  // src/model/marker-genes.js) can reuse this same six-frame translation
+  // rather than recomputing it — the brief's "reusing the same six-frame
+  // translation" design. Callers that don't need it (e.g. the Phase 2
+  // per-contig table) can just ignore/drop the field; it isn't part of
+  // the compact per-contig record the brief wants retained long-term.
+  return { length, gcContent, gcSkew, composition, codingDensity, ambiguousBaseCount: otherCount, frames };
 }
 
 const exportsObj = { computeContigStats, computeTetranucleotideComposition, computeCodingDensity, getCanonicalKmerIndex };

@@ -174,3 +174,78 @@ change than what's been done — worth it only if more throughput is needed late
 2. **Clustering method for step 1** — greedy approximate (minhash/k-mer-profile) vs. exact — I'd default to approximate for speed, willing to revisit if it under- or over-clusters during calibration.
 3. **taxdump merged/deleted taxID handling** — default plan above (map merged forward, warn-and-drop truly dead ones) — confirm this is acceptable rather than something that should hard-fail the build.
 4. Ready to proceed to repo scaffolding (site skeleton + `build/` stubs) once you've reviewed this, unless you'd rather adjust something above first.
+
+## Phase 3 findings — marker-gene identification module (implemented)
+
+Scope decision made and flagged rather than silently assumed: the brief's Phase 3 description ("produce per-contig
+gene-family tags and provenance taxIDs") only needs each hit's *raw* taxID, not the full lineage table — the
+taxID→lineage table and LCA/consensus-lineage computation are Phase 6 concerns (bin-level chimerism check) layered
+on top of these per-contig tags once bins exist. So **`build/03-taxonomy.js` is deferred until Phase 6 actually
+needs it**, not implemented as part of this phase — avoids building an asset nothing consumes yet.
+
+**Pipeline built and run against the real reference set**, not stubbed:
+- [build/01-cluster.js](../build/01-cluster.js): MinHash-based greedy clustering at the ~90%-identity-proxy
+  threshold from the earlier plan. Real run: 69,208 → 39,854 representatives (57.6% retained), 15s.
+- [build/02-index.js](../build/02-index.js): reduced-alphabet (Murphy10) seed index + real reference sequences.
+  Real run output: **18.9MB index + 13.0MB reference sequences ≈ 32MB total shipped assets.**
+- [src/model/reduced-alphabet.js](../src/model/reduced-alphabet.js), [blosum62.js](../src/model/blosum62.js),
+  [marker-genes.js](../src/model/marker-genes.js): shared Murphy10 windowing (build and runtime must window
+  identically or seeding can't find matches), the standard BLOSUM62 matrix, and the seed-and-extend search
+  itself — seeding, diagonal binning, ungapped X-drop extension, and all three paralog-safety checks from the
+  brief (score/coverage threshold, family-margin, multi-representative agreement) applied together.
+- Wired end-to-end: [src/workers/fasta-worker.js](../src/workers/fasta-worker.js) loads the ~32MB of assets as
+  soon as the worker starts (overlapping network time with the user picking a file), and runs marker search
+  against each contig's six-frame translation — the same translation `contig-stats.js` already computes for
+  coding density (`frames` now part of its return value), not recomputed. `app.js` shows a per-contig "Marker
+  genes" column plus assembly-level "contigs with marker genes" / "distinct families hit" summary stats.
+
+**Two real bugs caught by testing against actual data, not by the unit tests in isolation:**
+1. Reference headers are `COGID.fa.<taxID>.<locus_tag>` — `parts[1]` is the literal string `"fa"`, not the
+   taxID (`parts[2]` is). The initial `parseHeader` read `parts[1]`, silently producing `taxId=0` for every one
+   of the 39,854 representatives. Unit tests using hand-built fixtures didn't catch this (the fixtures had
+   correct taxIDs baked in already); running the real built index against a real contig and checking the
+   reported provenance taxID did. Fixed, and a regression test now covers `parseHeader` directly
+   ([test/build-index.test.js](../test/build-index.test.js)).
+2. A latent typed-array-length bug carried over from Phase 2's translation work (see above) — already fixed
+   there, re-verified it doesn't recur here since `marker-genes.js` reuses `translateSixFramesFromCodes` rather
+   than reimplementing translation.
+
+**Performance finding, the most consequential one in this phase — measured, not assumed:** an early version
+(k=5 reduced-alphabet seeding, no per-diagonal seed-count gate, 100-hits-per-key cap) made *every* window of
+even a fully random, marker-free contig a candidate for expensive extension: 81.5% of the 100,000 possible k=5
+reduced-alphabet keys are populated in this reference set (real protein sequences aren't remotely uniform over a
+10-letter alphabet), so a 20kb random contig took **1.6 seconds** to search — projecting to roughly an hour for
+a realistic 50MB assembly. Three fixes, each measured before/after rather than guessed:
+- **k=6 instead of 5** (1,000,000 possible keys): cuts populated-key occupancy to ~45%. 20kb random: 1.6s → 0.58s.
+- **Two-hit heuristic** (BLAST's classic fix for exactly this problem): only extend a `(refSeqId, diagonal)`
+  once it accumulates ≥2 distinct seeds, not on the first isolated one — a real homologous region produces many
+  seeds on the same diagonal; one isolated seed is usually chance noise. 20kb random: 0.58s → 0.32s.
+- **Lower per-key hit cap** (100 → 20; median is only 5 hits/key at k=6, so this leaves the large majority of
+  keys completely untouched): directly cuts the seeding/bookkeeping cost specifically for the generic,
+  over-represented keys a random sequence is most likely to hit. 50kb random: 0.80s → **0.24s**.
+
+**Net result: roughly 16x faster than the naive version, real detection unaffected** (verified against real
+COG0012/COG0016 fragments embedded in synthetic contigs throughout — both still call correctly with the tighter
+parameters). **Honestly, still not fast**: 0.24s per 50kb extrapolates to roughly **4 minutes for a realistic
+50MB assembly** — spent inside the same Worker that already keeps the page responsive during parsing (Phase 2),
+so this is a "the load takes several minutes, with visible per-contig progress" problem, not a frozen-tab
+problem, but still a real UX cost worth revisiting rather than quietly accepting. **Not done, flagged as
+follow-up** rather than pursued further given the scope already spent on this phase:
+- A minimizer-style seed selection (only check e.g. every 3rd window as a sketch, instead of every position) —
+  a genuine algorithmic speedup, not just parameter tuning, but a bigger change to get right.
+- More aggressive clustering (lower the ~90%-identity threshold further) — directly shrinks the index and
+  therefore seeding cost, at a real diversity cost to the multi-representative-agreement check.
+- Calibrating `MIN_SEEDS_PER_DIAGONAL`, `MAX_HITS_PER_KEY`, and `k` together against real assemblies (the
+  brief's own Phase 1 calibration ask) rather than the random-sequence proxy used here.
+
+**Calibration placeholders, explicitly not validated** (in `marker-genes.js`'s `DEFAULT_PARAMS`): `xDrop=15`,
+`minScore=50`, `minCoverage=0.5`, `minMargin=10`, `minRepresentatives=2`. These are reasonable starting points,
+not numbers tested against negative-control genomes as the brief's Phase 1 calibration explicitly calls for —
+exposed as overridable `params` specifically so real calibration doesn't require code changes later.
+
+**Tests**: 12 new tests across [test/marker-genes.test.js](../test/marker-genes.test.js) (binary round-trip,
+extension scoring and sentinel-halting, real-sequence family discrimination between two actual different COG
+families, negative control, both directions of the multi-representative-agreement check) and
+[test/build-index.test.js](../test/build-index.test.js) (the taxID-parsing regression). 40 tests total, all
+passing. Verified in-browser against a synthetic assembly with two contigs each containing a real, different
+embedded marker gene plus one marker-free contig — all three called correctly, no console errors.

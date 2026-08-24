@@ -50,11 +50,21 @@ function computeN50(lengthsDesc, totalLength) {
   return 0;
 }
 
+function formatMarkerHits(markerHits) {
+  if (!markerHits) return '<span class="hint" title="Marker-gene assets did not load">n/a</span>';
+  if (markerHits.length === 0) return '';
+  return markerHits
+    .map((h) => `<span title="${h.representativeCount} representatives agreed, score ${h.bestScore}, provenance taxID ${h.provenanceTaxId}">${h.family}</span>`)
+    .join(', ');
+}
+
 function renderContigTable(records) {
   const sorted = [...records].sort((a, b) => b.length - a.length);
   const totalLength = sorted.reduce((sum, r) => sum + r.length, 0);
   const n50 = computeN50(sorted.map((r) => r.length), totalLength);
   const meanGc = sorted.length ? sorted.reduce((sum, r) => sum + r.gcContent, 0) / sorted.length : 0;
+  const contigsWithMarkers = sorted.filter((r) => r.markerHits && r.markerHits.length > 0).length;
+  const distinctFamiliesHit = new Set(sorted.flatMap((r) => (r.markerHits || []).map((h) => h.family))).size;
 
   const explorer = document.getElementById('explorer');
   const rows = sorted
@@ -64,6 +74,7 @@ function renderContigTable(records) {
       <td class="num">${(r.gcContent * 100).toFixed(1)}%</td>
       <td class="num">${r.gcSkew.toFixed(3)}</td>
       <td class="num">${(r.codingDensity * 100).toFixed(1)}%</td>
+      <td>${formatMarkerHits(r.markerHits)}</td>
       <td class="num">${r.faiEntry.uniform ? '' : '⚠'}</td>
     </tr>`)
     .join('');
@@ -75,13 +86,15 @@ function renderContigTable(records) {
       <div class="row"><label>Total length</label><strong>${totalLength.toLocaleString()} bp</strong></div>
       <div class="row"><label>N50</label><strong>${n50.toLocaleString()} bp</strong></div>
       <div class="row"><label>Mean GC</label><strong>${(meanGc * 100).toFixed(1)}%</strong></div>
+      <div class="row"><label>Contigs with marker genes</label><strong>${contigsWithMarkers.toLocaleString()}</strong></div>
+      <div class="row"><label>Distinct marker families hit</label><strong>${distinctFamiliesHit} / 40</strong></div>
     </div>
     <div class="card">
       <h3>Per-contig properties</h3>
       <div class="row-count">${sorted.length.toLocaleString()} contigs, longest first</div>
       <div class="table-wrap scroll-panel">
         <table class="data-table">
-          <thead><tr><th>Contig</th><th>Length</th><th>GC%</th><th>GC skew</th><th>Coding density</th><th title="Non-uniform FASTA line wrapping">⚠</th></tr></thead>
+          <thead><tr><th>Contig</th><th>Length</th><th>GC%</th><th>GC skew</th><th>Coding density</th><th>Marker genes</th><th title="Non-uniform FASTA line wrapping">⚠</th></tr></thead>
           <tbody>${rows}</tbody>
         </table>
       </div>

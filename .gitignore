@@ -1,3 +1,9 @@
 node_modules/
 .DS_Store
 *.log
+
+# Regeneratable in ~25s via `node build/01-cluster.js && node build/02-index.js`
+# (see docs/phase1-investigation.md §4) — intermediate only, not shipped.
+# data/*.bin (the actual shipped assets) ARE committed, since GitHub Pages
+# serves them directly and there's no CI build step in this repo.
+build/intermediate/
