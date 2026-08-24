@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Clann MAG Explorer — browser-based MAG binning reconciliation and refinement</title>
+  <meta name="description" content="Free, browser-based tool for exploring and manually refining prokaryotic MAG binning results. Load an assembly and one or more binning tools' contig-to-bin tables, see where they agree and disagree, and reassign contigs interactively. Nothing is uploaded; everything runs in your browser." />
+  <meta name="keywords" content="MAG explorer, metagenome-assembled genome, binning, MetaBAT2, CONCOCT, MaxBin2, DAS_Tool, bin refinement, single-copy marker genes, completeness, contamination, MIMAG, genome-resolved metagenomics" />
+  <meta name="author" content="CreeveyLab" />
+  <link rel="canonical" href="https://chriscreevey.github.io/clann-mag-explorer/" />
+  <meta property="og:type" content="website" />
+  <meta property="og:site_name" content="Clann MAG Explorer" />
+  <meta property="og:title" content="Clann MAG Explorer — browser-based MAG binning reconciliation and refinement" />
+  <meta property="og:description" content="Load an assembly and multiple binning tools' contig-to-bin tables, see where they agree and disagree, and manually refine bins — all in your browser." />
+  <meta property="og:url" content="https://chriscreevey.github.io/clann-mag-explorer/" />
+  <meta name="twitter:card" content="summary" />
+  <meta name="twitter:title" content="Clann MAG Explorer — browser-based MAG binning reconciliation and refinement" />
+  <meta name="twitter:description" content="Load an assembly and multiple binning tools' contig-to-bin tables, see where they agree and disagree, and manually refine bins — all in your browser." />
+  <link rel="stylesheet" href="styles/main.css" />
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "WebApplication",
+    "name": "Clann MAG Explorer",
+    "url": "https://chriscreevey.github.io/clann-mag-explorer/",
+    "applicationCategory": "BioinformaticsApplication",
+    "operatingSystem": "Any (modern web browser)",
+    "browserRequirements": "Requires JavaScript",
+    "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+    "description": "Free browser-based tool for exploring and manually refining prokaryotic MAG binning results from a single assembly, reconciling multiple binning tools' contig-to-bin assignments contig by contig.",
+    "keywords": "MAG, metagenome-assembled genome, binning, MetaBAT2, CONCOCT, MaxBin2, DAS_Tool, bin refinement, completeness, contamination, MIMAG",
+    "author": { "@type": "Organization", "name": "CreeveyLab", "url": "https://www.creeveylab.org/" },
+    "codeRepository": "https://github.com/chriscreevey/clann-mag-explorer"
+  }
+  </script>
+</head>
+<body>
+<div id="app" style="display:flex;flex-direction:column;flex:1;min-height:0">
+  <header>
+    <span class="brand">Clann MAG Explorer</span>
+    <span class="title" id="hTitle"></span>
+    <span class="meta" id="hMeta"></span>
+    <span class="spacer"></span>
+    <button id="uploadBtn" type="button" title="Load an assembly and binning results">Choose files&hellip;</button>
+    <input id="folder-input" type="file" multiple style="display: none;" />
+    <button class="act" id="themeBtn" type="button" title="Toggle light/dark">&#9680;</button>
+  </header>
+
+  <main>
+    <aside id="side">
+      <h4>Load a run</h4>
+      <div class="hint" id="load-empty-state">
+        Choose an assembly FASTA and one or more contig&rarr;bin tables at once &mdash; identified by content, not
+        filename or extension. See <a href="#supported-input-sources">supported input sources</a> below for what's
+        accepted.
+      </div>
+      <ul id="file-ticklist" class="file-ticklist scroll-panel" style="display: none;"></ul>
+      <button id="load-selected-btn" class="act" type="button" style="display: none;">Load selected</button>
+
+      <details class="sect" id="rowFilters">
+        <summary>Filters &amp; search</summary>
+        <div id="filtersSectionBody"></div>
+      </details>
+
+      <details class="sect" id="rowTools">
+        <summary>Binning tools</summary>
+        <div id="toolsSectionBody"></div>
+      </details>
+    </aside>
+
+    <div id="wrap">
+      <div id="explorer" style="display: none;"></div>
+      <div id="empty">
+        <div class="hero">
+          <h1>Clann MAG Explorer</h1>
+          <div class="lead">
+            A free, browser-based tool for exploring and manually refining prokaryotic MAG binning results from a
+            single assembly. Load an assembly and one or more independent contig&rarr;bin tables (from different
+            binning tools run on that same assembly) to see, contig by contig, where those tools agree and where
+            they disagree &mdash; then reassign contigs interactively. Everything runs locally; nothing is
+            uploaded to a server.
+          </div>
+          <div class="exts">.fasta/.fa/.fna &middot; contig&rarr;bin tables &middot; coverage depth &middot; Kraken2 report</div>
+          <button id="emptyOpen" type="button">Choose files&hellip;</button>
+          <div class="scroll-hint">&darr; About &amp; FAQ</div>
+        </div>
+        <section class="about" id="about">
+          <h2>About Clann MAG Explorer</h2>
+          <p>
+            <strong>Clann MAG Explorer</strong> is a free, open-source tool for exploring and manually refining
+            metagenome-assembled genome (MAG) binning results. It does not run a binning algorithm itself &mdash;
+            it takes an assembly and one or more binning tools' independent contig-to-bin assignments, computes
+            per-contig statistics directly from the sequences, and gives you an interactive way to see where those
+            tools agree, where they disagree, and to manually reassign contigs in response.
+          </p>
+          <p>
+            This is under active development &mdash; see the
+            <a href="https://github.com/chriscreevey/clann-mag-explorer" target="_blank" rel="noopener">repository</a>
+            for current status.
+          </p>
+          <h3 id="supported-input-sources">Supported input sources</h3>
+          <ul class="input-source-list">
+            <li><strong>Assembly</strong> &mdash; a contig FASTA (<code>.fasta</code>/<code>.fa</code>/<code>.fna</code>, optionally gzip-compressed), source of every per-contig statistic.</li>
+            <li><strong>Contig&rarr;bin table</strong> (one or more) &mdash; a two-column tab/CSV file per binning tool, contig ID and bin ID.</li>
+            <li><strong>Coverage depth table</strong> &mdash; contig ID plus one depth column per sample.</li>
+            <li><strong>Kraken2 report</strong> &mdash; per-contig taxonomic call, reusing <a href="https://chriscreevey.github.io/clann-edna-explorer/" target="_blank" rel="noopener">Clann eDNA Explorer</a>'s report parser.</li>
+          </ul>
+          <p>
+            Every format is identified by file <strong>content</strong>, not filename or extension.
+          </p>
+          <p class="about-foot">
+            Developed by <a href="https://www.creeveylab.org/" target="_blank" rel="noopener">CreeveyLab</a> &middot;
+            <a href="https://github.com/chriscreevey/clann-mag-explorer" target="_blank" rel="noopener">source on GitHub</a> &middot;
+            part of the <a href="https://chriscreevey.github.io/">Clann suite</a>, alongside
+            <a href="https://chriscreevey.github.io/clann-tree-viewer/" target="_blank" rel="noopener">Clann Tree Viewer</a>,
+            <a href="https://chriscreevey.github.io/clann-blast-explorer/" target="_blank" rel="noopener">Clann BLAST Explorer</a>,
+            <a href="https://chriscreevey.github.io/clann-pangenome-explorer/" target="_blank" rel="noopener">Clann Pangenome Explorer</a>,
+            and <a href="https://chriscreevey.github.io/clann-edna-explorer/" target="_blank" rel="noopener">Clann eDNA Explorer</a>.
+          </p>
+        </section>
+      </div>
+      <div class="err" id="err" style="display: none;"></div>
+    </div>
+  </main>
+
+  <footer id="foot">
+    <span class="foot-l">
+      <strong>Clann MAG Explorer</strong><span class="sep">&middot;</span>developed by
+      <a href="https://www.creeveylab.org/" target="_blank" rel="noopener">CreeveyLab</a>
+    </span>
+    <span class="foot-r">
+      <a href="https://github.com/chriscreevey/clann-mag-explorer/issues/new/choose" target="_blank" rel="noopener" title="Suggest a feature or report a problem (opens GitHub — a free account is needed to post)">Feedback</a>
+      <a href="https://github.com/chriscreevey/clann-mag-explorer" target="_blank" rel="noopener" title="Source code on GitHub">GitHub</a>
+      <a class="like" href="https://github.com/chriscreevey/clann-mag-explorer" target="_blank" rel="noopener" title="Like it? Star the repository on GitHub"><span class="like-ico">&#9733;</span> Like it?</a>
+    </span>
+  </footer>
+</div>
+
+  <script src="src/parsers/sniff.js"></script>
+  <script src="src/parsers/contig-bin-table.js"></script>
+  <script src="src/parsers/coverage-table.js"></script>
+  <script src="src/parsers/breport.js"></script>
+  <script src="src/model/fasta-index.js"></script>
+  <script src="src/model/contig-stats.js"></script>
+  <script src="src/model/taxonomy-tree.js"></script>
+  <script src="src/model/bin-reconciliation.js"></script>
+  <script src="src/model/marker-genes.js"></script>
+  <script src="src/app.js"></script>
+</body>
+</html>
