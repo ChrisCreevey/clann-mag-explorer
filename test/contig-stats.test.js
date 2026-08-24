@@ -49,6 +49,17 @@ test('composition skips windows touching a non-ACGT base', () => {
   assert.strictEqual(sum, 0); // the only possible window (ACGN) is skipped
 });
 
+test('lowercase bases are treated the same as uppercase (no separate uppercasing step anymore)', () => {
+  const upper = computeContigStats('GGGGCCCCACGTACGT');
+  const lower = computeContigStats('ggggccccacgtacgt');
+  const mixed = computeContigStats('GgGgCcCcAcGtAcGt');
+  assert.deepStrictEqual(lower.composition, upper.composition);
+  assert.deepStrictEqual(mixed.composition, upper.composition);
+  assert.strictEqual(lower.gcContent, upper.gcContent);
+  assert.strictEqual(lower.ambiguousBaseCount, 0);
+  assert.strictEqual(lower.codingDensity, upper.codingDensity);
+});
+
 test('computeCodingDensity counts only segments at/above the minimum length', () => {
   // frame with one long run of 25 non-stop residues and one short run of 5
   const frame = 'X'.repeat(25) + '*' + 'X'.repeat(5);

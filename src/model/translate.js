@@ -5,16 +5,22 @@
 // Phase 2) and marker-genes.js (seed-and-extend search, Phase 3) — the
 // brief calls for reusing the same translation for both.
 //
-// Rewritten from a string-concatenation implementation to a typed-array
-// one after Phase 2 benchmarking showed this was the dominant cost on a
-// realistic assembly (see docs/phase1-investigation.md "Phase 2 findings"
-// / "Performance follow-ups"): per-codon string allocation
-// (`seq[i]+seq[i+1]+seq[i+2]`) and object-key hashing replaced with 2-bit
-// base codes, a 64-entry numeric codon table, and a single TextDecoder
-// pass instead of per-character string building. Public API (string in,
-// string out) is unchanged, so callers and tests didn't need to change.
+// Rewritten twice after Phase 2 benchmarking (see docs/phase1-investigation.md
+// "Phase 2 findings" / "Performance follow-ups"):
+//  1. String concatenation -> typed-array codon lookup.
+//  2. Reverse frames -> direct lookup against the forward sequence via
+//     RC_CODON_CHAR_CODE, no reverse-complement string ever built.
+//  3. (This version) All six frames now read from a single shared
+//     Int8Array of 2-bit base codes (dna-codes.js's computeBaseCodes),
+//     computed once and also reused by contig-stats.js's GC-counting and
+//     composition scan — removing the per-frame charCodeAt+BASE_CODE
+//     lookup that six separate string-scanning passes used to repeat.
+// Public API (string in, string out) is unchanged for translateFrame/
+// translateReverseFrame/translateSixFrames; the *FromCodes variants are
+// the new lower-level entry points contig-stats.js calls directly to
+// avoid recomputing the code array it already has.
 
-const { BASE_CODE, COMPLEMENT_CHAR_CODE } = (typeof module !== 'undefined' && module.exports)
+const { BASE_CODE, COMPLEMENT_CHAR_CODE, computeBaseCodes } = (typeof module !== 'undefined' && module.exports)
   ? require('./dna-codes')
   : self.ClannMAG.dnaCodes;
 
@@ -60,9 +66,8 @@ const CODON_CHAR_CODE = new Uint8Array(64);
 // acids encoded by a forward triplet and its opposite-strand counterpart
 // are both fixed functions of the same 3 bases, so this table makes a
 // reverse frame a direct lookup against the forward sequence with no
-// reverse-complement string ever built (a further Phase 2 performance
-// follow-up — see docs/phase1-investigation.md). Reverse complement of
-// codon (b0,b1,b2) is (3-b2, 3-b1, 3-b0): reverse the base order, and
+// reverse-complement string ever built. Reverse complement of codon
+// (b0,b1,b2) is (3-b2, 3-b1, 3-b0): reverse the base order, and
 // complement each (A/T and C/G pairs sum to 3 under this 2-bit encoding).
 const RC_CODON_CHAR_CODE = new Uint8Array(64);
 for (let code = 0; code < 64; code++) {
@@ -82,54 +87,82 @@ function reverseComplement(seq) {
 }
 
 /**
- * Translate one reading frame starting at `offset` (0, 1, or 2) into a
- * string of one-letter amino acid codes, with '*' marking stop codons —
- * a sentinel, per the brief, that later seeding/extension can't cross
- * (no k-mer lookup key spans a sentinel), making ORF segmentation an
- * implicit side effect rather than a separate step. A codon containing any
- * non-ACGT character (ambiguity codes, gaps) becomes 'X', distinct from
- * '*' so it never silently acts as a stop boundary.
+ * Translate one reading frame starting at `offset` (0, 1, or 2) against a
+ * precomputed base-code array (dna-codes.js's computeBaseCodes), returning
+ * raw amino-acid char codes (not yet decoded to a string) — the shared
+ * core translateFrame/translateSixFramesFromCodes build on. '*' marks a
+ * stop codon (a sentinel, per the brief, that later seeding/extension
+ * can't cross — no k-mer lookup key spans one, making ORF segmentation an
+ * implicit side effect rather than a separate step); a codon touching any
+ * non-ACGT position becomes 'X', distinct from '*' so it never silently
+ * acts as a stop boundary.
  */
-function translateFrame(seq, offset) {
-  const n = Math.max(0, Math.floor((seq.length - offset) / 3));
+function translateFrameCodes(codes, offset) {
+  const n = Math.max(0, Math.floor((codes.length - offset) / 3));
   const out = new Uint8Array(n);
   for (let k = 0, i = offset; k < n; k++, i += 3) {
-    const b0 = BASE_CODE[seq.charCodeAt(i)];
-    const b1 = BASE_CODE[seq.charCodeAt(i + 1)];
-    const b2 = BASE_CODE[seq.charCodeAt(i + 2)];
+    const b0 = codes[i], b1 = codes[i + 1], b2 = codes[i + 2];
     out[k] = (b0 < 0 || b1 < 0 || b2 < 0)
       ? X_CODE
       : CODON_CHAR_CODE[(b0 << 4) | (b1 << 2) | b2];
   }
-  return new TextDecoder().decode(out);
+  return out;
 }
 
 /**
- * Translate reverse-complement reading frame `offset` (0, 1, or 2, meaning
- * offset into the reverse complement, same convention as translateFrame)
- * directly against the forward-oriented `seq` — equivalent to
- * `translateFrame(reverseComplement(seq), offset)` but without ever
- * materializing the reverse-complement string. The reverse frame's first
- * codon is the reverse complement of `seq`'s last `3 - offset`-adjusted
- * window, so this walks `seq` right to left in triplets, each one a single
- * RC_CODON_CHAR_CODE lookup.
+ * Reverse-complement reading frame `offset` (same convention as
+ * translateFrameCodes, but offset into the reverse complement), computed
+ * directly against the forward-oriented `codes` array via
+ * RC_CODON_CHAR_CODE — equivalent to
+ * translateFrameCodes(reverseComplementCodes(codes), offset) but without
+ * ever building that reverse-complement array. Walks `codes` right to
+ * left in triplets, matching how the reverse frame's first codon is the
+ * reverse complement of the *last* 3-adjusted window of the forward
+ * sequence, and each subsequent codon steps left by 3.
  */
-function translateReverseFrame(seq, offset) {
-  const n = seq.length;
+function translateReverseFrameCodes(codes, offset) {
+  const n = codes.length;
   const count = Math.max(0, Math.floor((n - offset) / 3));
   const out = new Uint8Array(count);
   let end = n - offset; // exclusive end of the current forward-sequence window
   for (let k = 0; k < count; k++) {
     const start = end - 3;
-    const b0 = BASE_CODE[seq.charCodeAt(start)];
-    const b1 = BASE_CODE[seq.charCodeAt(start + 1)];
-    const b2 = BASE_CODE[seq.charCodeAt(start + 2)];
+    const b0 = codes[start], b1 = codes[start + 1], b2 = codes[start + 2];
     out[k] = (b0 < 0 || b1 < 0 || b2 < 0)
       ? X_CODE
       : RC_CODON_CHAR_CODE[(b0 << 4) | (b1 << 2) | b2];
     end = start;
   }
-  return new TextDecoder().decode(out);
+  return out;
+}
+
+/** String-in/string-out convenience wrapper around translateFrameCodes. */
+function translateFrame(seq, offset) {
+  return new TextDecoder().decode(translateFrameCodes(computeBaseCodes(seq), offset));
+}
+
+/** String-in/string-out convenience wrapper around translateReverseFrameCodes. */
+function translateReverseFrame(seq, offset) {
+  return new TextDecoder().decode(translateReverseFrameCodes(computeBaseCodes(seq), offset));
+}
+
+/**
+ * All six reading frames against a precomputed base-code array — the core
+ * contig-stats.js calls directly, since it already has the code array
+ * from its own GC/composition pass and shouldn't recompute it.
+ * @param {Int8Array} codes
+ * @returns {[string, string, string, string, string, string]}
+ */
+function translateSixFramesFromCodes(codes) {
+  const decoder = new TextDecoder();
+  return [
+    decoder.decode(translateFrameCodes(codes, 0)),
+    decoder.decode(translateFrameCodes(codes, 1)),
+    decoder.decode(translateFrameCodes(codes, 2)),
+    decoder.decode(translateReverseFrameCodes(codes, 0)),
+    decoder.decode(translateReverseFrameCodes(codes, 1)),
+    decoder.decode(translateReverseFrameCodes(codes, 2)),
+  ];
 }
 
 /**
@@ -137,17 +170,18 @@ function translateReverseFrame(seq, offset) {
  * complement) as one continuous amino-acid string each, per the brief's
  * "no separate ORF-calling step" design.
  *
- * @param {string} seq - uppercase DNA sequence
+ * @param {string} seq - DNA sequence (any case)
  * @returns {[string, string, string, string, string, string]}
  */
 function translateSixFrames(seq) {
-  return [
-    translateFrame(seq, 0), translateFrame(seq, 1), translateFrame(seq, 2),
-    translateReverseFrame(seq, 0), translateReverseFrame(seq, 1), translateReverseFrame(seq, 2),
-  ];
+  return translateSixFramesFromCodes(computeBaseCodes(seq));
 }
 
-const exportsObj = { CODON_TABLE, reverseComplement, translateFrame, translateReverseFrame, translateSixFrames };
+const exportsObj = {
+  CODON_TABLE, reverseComplement,
+  translateFrame, translateReverseFrame, translateSixFrames,
+  translateFrameCodes, translateReverseFrameCodes, translateSixFramesFromCodes,
+};
 if (typeof module !== 'undefined' && module.exports) module.exports = exportsObj;
 if (typeof self !== 'undefined') {
   self.ClannMAG = self.ClannMAG || {};

@@ -33,6 +33,11 @@ test('translateSixFrames returns 3 forward + 3 reverse-complement frames', () =>
   assert.strictEqual(frames[3], translateFrame(reverseComplement('ATGGCATTTATGGCATTTA'), 0));
 });
 
+test('translateFrame treats lowercase bases the same as uppercase', () => {
+  assert.strictEqual(translateFrame('atggcattt', 0), translateFrame('ATGGCATTT', 0));
+  assert.strictEqual(translateFrame('AtgGcAttt', 0), translateFrame('ATGGCATTT', 0));
+});
+
 test('translateReverseFrame matches translateFrame(reverseComplement(seq), offset) exactly', () => {
   // Deterministic pseudo-random sequences at several lengths, including
   // ones not evenly divisible by 3 and lengths shorter than one codon,

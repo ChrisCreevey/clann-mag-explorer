@@ -120,11 +120,53 @@ three offsets — this also caught a latent bug in both `translateFrame` and the
 negative `(length - offset)` produced a negative typed-array length for very short sequences, now clamped to 0.
 
 **Result**: translation alone is 4-9x faster in isolation (JIT-warmup-dependent), but the full pipeline only
-improved 3.17s → 2.95s (~7%) on the same 50MB benchmark — translation was no longer the dominant cost after the
-first optimization round, so other steps (line-by-line parsing, `seq +=` accumulation, the composition scan, GC
-counting) now make up a larger share of the total. Reported honestly rather than implying a bigger win than the
-full-pipeline number shows; a further round on those other steps would be the next place to look if more
-throughput is needed later.
+improved 3.17s → 2.95s (~7%) on the same 50MB benchmark. This turned out to be premature — see below, actual
+profiling showed translation was *still* the dominant cost.
+
+**Third round — unified base-code pipeline (user-suggested, following the same reasoning as the RC-codon
+table).** Rather than guessing further, profiled `computeContigStats` directly (50MB/~4,800-contig benchmark,
+2.69s of the pipeline's 2.95s total):
+
+| Step | Time | Note |
+|---|---|---|
+| `toUpperCase()` | 47ms | cheap alone, but unconditional every contig |
+| GC-counting (`ch === 'G'` string comparison) | 520ms | surprisingly expensive vs. integer ops |
+| Composition scan | 382ms | already typed-array based |
+| Six-frame translation | 1,677ms | **62% of the total — still dominant**, correcting the "no longer dominant" guess above |
+
+The real inefficiency: GC-counting, composition, and all six translation frames were each independently
+re-deriving "which base is this" from the string — via three different techniques (string equality, `charCodeAt`
++lookup, `charCodeAt`+lookup again per frame) — touching most bases 6+ times combined.
+
+**Fix**: [src/model/dna-codes.js](../src/model/dna-codes.js) gained `computeBaseCodes(seq)`, converting the whole
+sequence to a 2-bit-per-base `Int8Array` once, with `BASE_CODE` extended to cover lowercase too (removing the
+`toUpperCase()` pass entirely — no more separate case-folding copy). GC-counting and the composition scan are now
+fused into one pass over that array in [contig-stats.js](../src/model/contig-stats.js)'s new `scanBaseCodes()`.
+[translate.js](../src/model/translate.js) gained `*FromCodes` variants (`translateFrameCodes`,
+`translateReverseFrameCodes`, `translateSixFramesFromCodes`) that read codons via pure integer array indexing
+instead of `charCodeAt`+lookup; the original string-in/string-out functions (`translateFrame`,
+`translateReverseFrame`, `translateSixFrames`) became thin wrappers for callers that don't already have a code
+array, so the public API and all prior tests were unaffected.
+
+Verified via existing tests plus two new ones (lowercase-vs-uppercase equivalence in both `contig-stats.test.js`
+and `translate.test.js`, since the case-insensitive `BASE_CODE` is new behavior worth locking in) — 31 tests
+pass. Prototyped the approach with real numbers before implementing: `computeContigStats` dropped from 2.69s to
+1.52s (~44% further cut) in the prototype, and after full implementation the **complete `streamFasta` pipeline
+dropped from 2.95s to 2.09s (~29%)** on the same 50MB benchmark.
+
+**Running total across all three optimization rounds: 22.5s → 2.09s, a ~10.8x overall speedup**, verified
+correct at each step (unit tests + in-browser check against the example assembly, same output every time) rather
+than trading correctness for speed.
+
+**Considered and rejected**: switching `current.seq += line` (accumulating a contig's sequence while streaming)
+to array-push-then-join, on the general JS-performance folklore that repeated `+=` is slow. Measured it directly
+instead of assuming — `+=` was actually faster on a representative sample (V8's rope-based concatenation handles
+this pattern well) — so left unchanged. Not guessing where a quick measurement settles it.
+
+**Still on the table, not done**: a byte-level rewrite of the line-parsing loop itself (operating on raw
+`Uint8Array` chunks instead of decoding to strings, only decoding headers). Line parsing is a small slice of
+total time (~9% before this round, likely less now that translation shrank), so this is a smaller/riskier-return
+change than what's been done — worth it only if more throughput is needed later.
 
 ## Still open / needs your call before I start writing code
 
