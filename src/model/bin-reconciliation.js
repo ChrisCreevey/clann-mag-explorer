@@ -13,8 +13,8 @@ function reconcileBins(contigBinTables) {
 
 const exportsObj = { reconcileBins };
 if (typeof module !== 'undefined' && module.exports) module.exports = exportsObj;
-if (typeof window !== 'undefined') {
-  window.ClannMAG = window.ClannMAG || {};
-  window.ClannMAG.binReconciliation = exportsObj;
+if (typeof self !== 'undefined') {
+  self.ClannMAG = self.ClannMAG || {};
+  self.ClannMAG.binReconciliation = exportsObj;
 }
 })();

@@ -126,8 +126,8 @@ class TaxonomyTree {
 
 const taxonomyTreeExports = { TaxonomyTree, canonicalRank };
 if (typeof module !== 'undefined' && module.exports) module.exports = taxonomyTreeExports;
-if (typeof window !== 'undefined') {
-  window.ClannMAG = window.ClannMAG || {};
-  window.ClannMAG.taxonomyTree = taxonomyTreeExports;
+if (typeof self !== 'undefined') {
+  self.ClannMAG = self.ClannMAG || {};
+  self.ClannMAG.taxonomyTree = taxonomyTreeExports;
 }
 })();

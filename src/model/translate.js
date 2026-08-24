@@ -3,15 +3,27 @@
 
 // Six-frame translation shared by contig-stats.js (coding-density estimate,
 // Phase 2) and marker-genes.js (seed-and-extend search, Phase 3) — the
-// brief calls for reusing the same translation for both (§Marker-gene
-// identification module: "reusing the same six-frame translation, searched
-// as continuous sentinel-delimited strings rather than pre-cut segments").
+// brief calls for reusing the same translation for both.
 //
-// Standard genetic code (NCBI table 1). Start-codon distinctions (table 11
-// etc.) don't matter here: nothing downstream requires a start codon (see
-// brief's note on contig-edge-truncated marker fragments), only the
-// stop/non-stop amino-acid assignment.
+// Rewritten from a string-concatenation implementation to a typed-array
+// one after Phase 2 benchmarking showed this was the dominant cost on a
+// realistic assembly (see docs/phase1-investigation.md "Phase 2 findings"
+// / "Performance follow-ups"): per-codon string allocation
+// (`seq[i]+seq[i+1]+seq[i+2]`) and object-key hashing replaced with 2-bit
+// base codes, a 64-entry numeric codon table, and a single TextDecoder
+// pass instead of per-character string building. Public API (string in,
+// string out) is unchanged, so callers and tests didn't need to change.
 
+const { BASE_CODE, COMPLEMENT_CHAR_CODE } = (typeof module !== 'undefined' && module.exports)
+  ? require('./dna-codes')
+  : self.ClannMAG.dnaCodes;
+
+// Standard genetic code (NCBI table 1), keyed by codon string for
+// readability, converted once below into a 64-entry numeric lookup
+// (index = base2bit0<<4 | base2bit1<<2 | base2bit2). Start-codon
+// distinctions (table 11 etc.) don't matter here: nothing downstream
+// requires a start codon (see brief's note on contig-edge-truncated
+// marker fragments), only the stop/non-stop amino-acid assignment.
 const CODON_TABLE = {
   TTT: 'F', TTC: 'F', TTA: 'L', TTG: 'L',
   CTT: 'L', CTC: 'L', CTA: 'L', CTG: 'L',
@@ -31,25 +43,26 @@ const CODON_TABLE = {
   GGT: 'G', GGC: 'G', GGA: 'G', GGG: 'G',
 };
 
-const DNA_COMPLEMENT = {
-  A: 'T', T: 'A', C: 'G', G: 'C', U: 'A',
-  R: 'Y', Y: 'R', S: 'S', W: 'W', K: 'M', M: 'K',
-  B: 'V', D: 'H', H: 'D', V: 'B', N: 'N',
-};
+const X_CODE = 'X'.charCodeAt(0);
 
-/**
- * Reverse complement of an uppercase DNA/IUPAC-ambiguity-code string.
- * Builds into a pre-sized array and joins once, rather than repeated
- * string `+=`, which matters at assembly scale (tens of thousands of
- * contigs, each translated in six frames — see docs/phase1-investigation.md).
- */
+// codonCharCode[b0*16 + b1*4 + b2] = charCode of the amino acid (or '*').
+const CODON_CHAR_CODE = new Uint8Array(64);
+{
+  const code = { A: 0, C: 1, G: 2, T: 3 };
+  for (const [codon, aa] of Object.entries(CODON_TABLE)) {
+    const idx = (code[codon[0]] << 4) | (code[codon[1]] << 2) | code[codon[2]];
+    CODON_CHAR_CODE[idx] = aa.charCodeAt(0);
+  }
+}
+
+/** Reverse complement of an uppercase DNA/IUPAC-ambiguity-code string. */
 function reverseComplement(seq) {
   const n = seq.length;
-  const out = new Array(n);
+  const out = new Uint8Array(n);
   for (let i = 0; i < n; i++) {
-    out[n - 1 - i] = DNA_COMPLEMENT[seq[i]] || 'N';
+    out[n - 1 - i] = COMPLEMENT_CHAR_CODE[seq.charCodeAt(i)];
   }
-  return out.join('');
+  return new TextDecoder().decode(out);
 }
 
 /**
@@ -63,12 +76,16 @@ function reverseComplement(seq) {
  */
 function translateFrame(seq, offset) {
   const n = Math.floor((seq.length - offset) / 3);
-  const out = new Array(n);
+  const out = new Uint8Array(n);
   for (let k = 0, i = offset; k < n; k++, i += 3) {
-    const codon = seq[i] + seq[i + 1] + seq[i + 2];
-    out[k] = CODON_TABLE[codon] || 'X';
+    const b0 = BASE_CODE[seq.charCodeAt(i)];
+    const b1 = BASE_CODE[seq.charCodeAt(i + 1)];
+    const b2 = BASE_CODE[seq.charCodeAt(i + 2)];
+    out[k] = (b0 < 0 || b1 < 0 || b2 < 0)
+      ? X_CODE
+      : CODON_CHAR_CODE[(b0 << 4) | (b1 << 2) | b2];
   }
-  return out.join('');
+  return new TextDecoder().decode(out);
 }
 
 /**
@@ -89,8 +106,8 @@ function translateSixFrames(seq) {
 
 const exportsObj = { CODON_TABLE, reverseComplement, translateFrame, translateSixFrames };
 if (typeof module !== 'undefined' && module.exports) module.exports = exportsObj;
-if (typeof window !== 'undefined') {
-  window.ClannMAG = window.ClannMAG || {};
-  window.ClannMAG.translate = exportsObj;
+if (typeof self !== 'undefined') {
+  self.ClannMAG = self.ClannMAG || {};
+  self.ClannMAG.translate = exportsObj;
 }
 })();

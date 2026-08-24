@@ -79,8 +79,8 @@ function parseBreport(text, tree, contigId) {
 
 const breportExports = { parseBreport, parseBreportLine };
 if (typeof module !== 'undefined' && module.exports) module.exports = breportExports;
-if (typeof window !== 'undefined') {
-  window.ClannMAG = window.ClannMAG || {};
-  window.ClannMAG.breport = breportExports;
+if (typeof self !== 'undefined') {
+  self.ClannMAG = self.ClannMAG || {};
+  self.ClannMAG.breport = breportExports;
 }
 })();

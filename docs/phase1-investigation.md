@@ -86,6 +86,25 @@ responsiveness) since nothing here runs off-thread yet. Worth a decision before 
 
 Not blocking further Phase 2/3 development, but flagging now rather than after Phase 3 makes it worse.
 
+**Update — both follow-ups implemented before starting Phase 3:**
+- **Typed-array translation** ([src/model/translate.js](../src/model/translate.js),
+  [src/model/contig-stats.js](../src/model/contig-stats.js), new shared
+  [src/model/dna-codes.js](../src/model/dna-codes.js)): per-base string allocation and object-key hashing
+  replaced with 2-bit base codes, a 64-entry numeric codon table, a rolling integer k-mer code for the
+  composition scan, and a single `TextDecoder` pass instead of per-character string building. Public API
+  unchanged (string in, string out), so no test or caller changes needed beyond re-running them.
+  **Result: the same 50MB/4,773-contig benchmark dropped from 22.5s to 3.17s — a 7x speedup.** A 300MB assembly
+  is now on the order of ~19s of compute instead of ~2 minutes.
+- **Web Worker** ([src/workers/fasta-worker.js](../src/workers/fasta-worker.js)): the streaming parse now runs
+  off the main thread. `app.js` posts the `File` to the worker, which streams it via the same `fasta-index.js`
+  and posts per-contig records plus progress pings (every 200 contigs) back; the UI renders a live "N contigs so
+  far" message and stays responsive throughout, instead of freezing for the parse's duration. Verified in-browser
+  with a 900-contig/3.1MB synthetic file (0.2s) and the smaller example assembly — no console errors either way.
+- Both changes required switching every model/parser module's environment guard from `window` to `self`
+  (`self === window` on the main thread, but only `self` exists inside a Worker), so the same unmodified files
+  load via both `<script>` tags and `importScripts()`. This also means Phase 3's marker-gene search can reuse
+  these modules directly inside a worker (the same or a new one) without further changes.
+
 ## Still open / needs your call before I start writing code
 
 1. **Reduced alphabet scheme** — I'll default to a published one (e.g. Murphy10) unless you have a preference.

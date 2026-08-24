@@ -11,8 +11,8 @@ function parseContigBinTable(text) {
 
 const exportsObj = { parseContigBinTable };
 if (typeof module !== 'undefined' && module.exports) module.exports = exportsObj;
-if (typeof window !== 'undefined') {
-  window.ClannMAG = window.ClannMAG || {};
-  window.ClannMAG.contigBinTable = exportsObj;
+if (typeof self !== 'undefined') {
+  self.ClannMAG = self.ClannMAG || {};
+  self.ClannMAG.contigBinTable = exportsObj;
 }
 })();

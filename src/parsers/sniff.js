@@ -12,8 +12,8 @@ function sniff(text) {
 
 const sniffExports = { sniff };
 if (typeof module !== 'undefined' && module.exports) module.exports = sniffExports;
-if (typeof window !== 'undefined') {
-  window.ClannMAG = window.ClannMAG || {};
-  window.ClannMAG.sniff = sniffExports;
+if (typeof self !== 'undefined') {
+  self.ClannMAG = self.ClannMAG || {};
+  self.ClannMAG.sniff = sniffExports;
 }
 })();

@@ -11,8 +11,8 @@ function parseCoverageTable(text) {
 
 const exportsObj = { parseCoverageTable };
 if (typeof module !== 'undefined' && module.exports) module.exports = exportsObj;
-if (typeof window !== 'undefined') {
-  window.ClannMAG = window.ClannMAG || {};
-  window.ClannMAG.coverageTable = exportsObj;
+if (typeof self !== 'undefined') {
+  self.ClannMAG = self.ClannMAG || {};
+  self.ClannMAG.coverageTable = exportsObj;
 }
 })();

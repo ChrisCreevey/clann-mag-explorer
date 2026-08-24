@@ -91,22 +91,45 @@ function renderContigTable(records) {
   explorer.style.display = 'flex';
 }
 
-async function loadAssembly(file) {
-  const { streamFasta } = window.ClannMAG.fastaIndex;
-  showError(`Parsing ${file.name}…`);
-  const records = [];
-  const t0 = performance.now();
-  try {
-    const summary = await streamFasta(file, (record) => records.push(record));
-    const elapsed = ((performance.now() - t0) / 1000).toFixed(1);
-    showError(null);
-    renderContigTable(records);
-    document.getElementById('hMeta').textContent =
-      `${summary.contigCount.toLocaleString()} contigs · ${summary.totalLength.toLocaleString()} bp · parsed in ${elapsed}s`;
-    document.getElementById('hTitle').textContent = file.name;
-  } catch (err) {
-    showError(`Failed to parse ${file.name}: ${err.message}`);
-  }
+// Parsing runs in a Worker (src/workers/fasta-worker.js) rather than on the
+// main thread — see docs/phase1-investigation.md "Performance follow-ups":
+// same total work, but the page stays responsive and can show live
+// progress instead of freezing for however long a large assembly takes.
+function loadAssembly(file) {
+  return new Promise((resolve, reject) => {
+    const worker = new Worker('src/workers/fasta-worker.js');
+    const records = [];
+    const t0 = performance.now();
+    showError(`Parsing ${file.name}… 0 contigs so far`);
+
+    worker.onmessage = (e) => {
+      const msg = e.data;
+      if (msg.type === 'contig') {
+        records.push(msg.record);
+      } else if (msg.type === 'progress') {
+        showError(`Parsing ${file.name}… ${msg.contigsSoFar.toLocaleString()} contigs so far`);
+      } else if (msg.type === 'done') {
+        const elapsed = ((performance.now() - t0) / 1000).toFixed(1);
+        showError(null);
+        renderContigTable(records);
+        document.getElementById('hMeta').textContent =
+          `${msg.summary.contigCount.toLocaleString()} contigs · ${msg.summary.totalLength.toLocaleString()} bp · parsed in ${elapsed}s`;
+        document.getElementById('hTitle').textContent = file.name;
+        worker.terminate();
+        resolve();
+      } else if (msg.type === 'error') {
+        showError(`Failed to parse ${file.name}: ${msg.message}`);
+        worker.terminate();
+        reject(new Error(msg.message));
+      }
+    };
+    worker.onerror = (err) => {
+      showError(`Failed to parse ${file.name}: ${err.message}`);
+      worker.terminate();
+      reject(err);
+    };
+    worker.postMessage({ file });
+  });
 }
 
 function initFilePicker() {
@@ -128,7 +151,11 @@ function initFilePicker() {
       showError('No file among your selection looks like a FASTA assembly (checked for a leading ">" or gzip magic bytes). Bin/coverage table loading isn’t implemented yet.');
       return;
     }
-    await loadAssembly(assemblyFile);
+    try {
+      await loadAssembly(assemblyFile);
+    } catch {
+      // already surfaced via showError inside loadAssembly
+    }
   });
 }
 

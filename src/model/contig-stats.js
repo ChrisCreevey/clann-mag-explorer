@@ -6,64 +6,81 @@
 // GC content, GC skew, a tetranucleotide composition signature, and a
 // coding-density estimate — everything retained after the raw sequence
 // itself is discarded.
+//
+// The composition scan was rewritten from per-position substr()+Map
+// lookup to a rolling 2-bit-per-base integer code after Phase 2
+// benchmarking flagged it as a secondary cost alongside six-frame
+// translation (see docs/phase1-investigation.md "Performance follow-ups").
 
 const { translateSixFrames } = (typeof module !== 'undefined' && module.exports)
   ? require('./translate')
-  : window.ClannMAG.translate;
+  : self.ClannMAG.translate;
+const { BASE_CODE, BASE_CHAR } = (typeof module !== 'undefined' && module.exports)
+  ? require('./dna-codes')
+  : self.ClannMAG.dnaCodes;
 
 const K = 4; // tetranucleotide, the standard choice for binning-style composition vectors
-const BASES = ['A', 'C', 'G', 'T'];
-const DNA_COMPLEMENT = { A: 'T', C: 'G', G: 'C', T: 'A' };
+const KMER_SPACE = 1 << (2 * K); // 256 possible 4-mers
 
-function reverseComplementDNA(kmer) {
-  let out = '';
-  for (let i = kmer.length - 1; i >= 0; i--) out += DNA_COMPLEMENT[kmer[i]];
-  return out;
+function codeToKmerString(code) {
+  let s = '';
+  for (let shift = 2 * (K - 1); shift >= 0; shift -= 2) s += BASE_CHAR[(code >> shift) & 3];
+  return s;
 }
 
-// Canonical-kmer lookup, built once and cached: every possible 4-mer maps
-// to whichever of {itself, its reverse complement} sorts first, collapsing
-// the 256 possible 4-mers to 136 canonical bins so strand doesn't matter.
+/** Reverse complement of a k-mer packed as a 2-bit-per-base integer. */
+function reverseComplementCode(code, k) {
+  let rc = 0;
+  for (let i = 0; i < k; i++) {
+    const base = (code >> (2 * i)) & 3; // LSB-first walk = kmer read back-to-front
+    rc = (rc << 2) | (3 - base); // A(0)<->T(3), C(1)<->G(2): complement is 3-x
+  }
+  return rc;
+}
+
+// Canonical-kmer lookup, built once and cached: every possible 4-mer code
+// maps to the array index of whichever of {itself, its reverse complement}
+// is numerically smaller, collapsing the 256 possible 4-mers to 136
+// canonical bins so strand doesn't matter.
 let canonicalKmerCache = null;
 function getCanonicalKmerIndex() {
   if (canonicalKmerCache) return canonicalKmerCache;
 
-  const all = [];
-  (function gen(prefix) {
-    if (prefix.length === K) { all.push(prefix); return; }
-    for (const b of BASES) gen(prefix + b);
-  })('');
-
-  const canonicalSet = new Set();
-  for (const kmer of all) {
-    const rc = reverseComplementDNA(kmer);
-    canonicalSet.add(kmer < rc ? kmer : rc);
+  const canonicalOfCode = new Int16Array(KMER_SPACE);
+  for (let code = 0; code < KMER_SPACE; code++) {
+    const rc = reverseComplementCode(code, K);
+    canonicalOfCode[code] = Math.min(code, rc);
   }
-  const canonicalList = [...canonicalSet].sort();
-  const canonIndexByKmer = new Map(canonicalList.map((k, i) => [k, i]));
+  const canonicalCodes = [...new Set(canonicalOfCode)].sort((a, b) => a - b);
+  const canonIndexByCode = new Map(canonicalCodes.map((c, i) => [c, i]));
 
-  const kmerToCanonIndex = new Map();
-  for (const kmer of all) {
-    const rc = reverseComplementDNA(kmer);
-    const canon = kmer < rc ? kmer : rc;
-    kmerToCanonIndex.set(kmer, canonIndexByKmer.get(canon));
+  const kmerCodeToCanonIndex = new Int16Array(KMER_SPACE);
+  for (let code = 0; code < KMER_SPACE; code++) {
+    kmerCodeToCanonIndex[code] = canonIndexByCode.get(canonicalOfCode[code]);
   }
+  const canonicalList = canonicalCodes.map(codeToKmerString);
 
-  canonicalKmerCache = { canonicalList, kmerToCanonIndex };
+  canonicalKmerCache = { canonicalList, kmerCodeToCanonIndex };
   return canonicalKmerCache;
 }
 
 /** Canonical-tetranucleotide relative-frequency signature, keyed by canonical 4-mer. */
 function computeTetranucleotideComposition(seq) {
-  const { canonicalList, kmerToCanonIndex } = getCanonicalKmerIndex();
+  const { canonicalList, kmerCodeToCanonIndex } = getCanonicalKmerIndex();
   const counts = new Float64Array(canonicalList.length);
   let total = 0;
 
-  for (let i = 0; i + K <= seq.length; i++) {
-    const idx = kmerToCanonIndex.get(seq.substr(i, K));
-    if (idx === undefined) continue; // window touches a non-ACGT base
-    counts[idx]++;
-    total++;
+  let code = 0;
+  let validRun = 0; // consecutive ACGT bases seen so far, resets on any ambiguity code
+  for (let i = 0; i < seq.length; i++) {
+    const b = BASE_CODE[seq.charCodeAt(i)];
+    if (b < 0) { validRun = 0; continue; }
+    code = ((code << 2) | b) & (KMER_SPACE - 1);
+    validRun++;
+    if (validRun >= K) {
+      counts[kmerCodeToCanonIndex[code]]++;
+      total++;
+    }
   }
 
   const freq = {};
@@ -120,8 +137,8 @@ function computeContigStats(seq) {
 
 const exportsObj = { computeContigStats, computeTetranucleotideComposition, computeCodingDensity, getCanonicalKmerIndex };
 if (typeof module !== 'undefined' && module.exports) module.exports = exportsObj;
-if (typeof window !== 'undefined') {
-  window.ClannMAG = window.ClannMAG || {};
-  window.ClannMAG.contigStats = exportsObj;
+if (typeof self !== 'undefined') {
+  self.ClannMAG = self.ClannMAG || {};
+  self.ClannMAG.contigStats = exportsObj;
 }
 })();

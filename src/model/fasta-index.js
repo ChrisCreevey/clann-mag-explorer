@@ -23,7 +23,7 @@
 
 const { computeContigStats } = (typeof module !== 'undefined' && module.exports)
   ? require('./contig-stats')
-  : window.ClannMAG.contigStats;
+  : self.ClannMAG.contigStats;
 
 async function isGzipped(blob) {
   if (blob.size < 2) return false;
@@ -119,8 +119,8 @@ async function streamFasta(blob, onContig) {
 
 const exportsObj = { streamFasta, isGzipped };
 if (typeof module !== 'undefined' && module.exports) module.exports = exportsObj;
-if (typeof window !== 'undefined') {
-  window.ClannMAG = window.ClannMAG || {};
-  window.ClannMAG.fastaIndex = exportsObj;
+if (typeof self !== 'undefined') {
+  self.ClannMAG = self.ClannMAG || {};
+  self.ClannMAG.fastaIndex = exportsObj;
 }
 })();
