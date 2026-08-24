@@ -105,6 +105,27 @@ Not blocking further Phase 2/3 development, but flagging now rather than after P
   load via both `<script>` tags and `importScripts()`. This also means Phase 3's marker-gene search can reuse
   these modules directly inside a worker (the same or a new one) without further changes.
 
+**Second typed-array follow-up (user-suggested):** the reverse-frame translation was still building a full
+reverse-complement string, then re-scanning it three times with the same base-code lookup already paid for once
+during that construction — a genuine redundancy, since a codon's reverse-complement amino acid is a fixed
+function of that codon alone. Replaced with a 64-entry `RC_CODON_CHAR_CODE` table (forward codon code →
+reverse-complement translation) and `translateReverseFrame(seq, offset)`, which walks the *forward* sequence
+right-to-left in triplets and does one table lookup per codon — no reverse-complement string ever built.
+`reverseComplement()` itself stays exported (still useful for Phase 9 sequence extraction), just no longer used
+inside `translateSixFrames`.
+
+Verified equivalent to the old `translateFrame(reverseComplement(seq), offset)` behaviour via a property test
+across sequence lengths 0–1000 (including lengths shorter than one codon and lengths not divisible by 3) and all
+three offsets — this also caught a latent bug in both `translateFrame` and the new function: `Math.floor` on a
+negative `(length - offset)` produced a negative typed-array length for very short sequences, now clamped to 0.
+
+**Result**: translation alone is 4-9x faster in isolation (JIT-warmup-dependent), but the full pipeline only
+improved 3.17s → 2.95s (~7%) on the same 50MB benchmark — translation was no longer the dominant cost after the
+first optimization round, so other steps (line-by-line parsing, `seq +=` accumulation, the composition scan, GC
+counting) now make up a larger share of the total. Reported honestly rather than implying a bigger win than the
+full-pipeline number shows; a further round on those other steps would be the next place to look if more
+throughput is needed later.
+
 ## Still open / needs your call before I start writing code
 
 1. **Reduced alphabet scheme** — I'll default to a published one (e.g. Murphy10) unless you have a preference.

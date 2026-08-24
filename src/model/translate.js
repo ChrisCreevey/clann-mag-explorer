@@ -55,6 +55,22 @@ const CODON_CHAR_CODE = new Uint8Array(64);
   }
 }
 
+// rcCodonCharCode[b0*16 + b1*4 + b2] = amino acid you'd get by translating
+// the *reverse complement* of that forward codon — i.e. the two amino
+// acids encoded by a forward triplet and its opposite-strand counterpart
+// are both fixed functions of the same 3 bases, so this table makes a
+// reverse frame a direct lookup against the forward sequence with no
+// reverse-complement string ever built (a further Phase 2 performance
+// follow-up — see docs/phase1-investigation.md). Reverse complement of
+// codon (b0,b1,b2) is (3-b2, 3-b1, 3-b0): reverse the base order, and
+// complement each (A/T and C/G pairs sum to 3 under this 2-bit encoding).
+const RC_CODON_CHAR_CODE = new Uint8Array(64);
+for (let code = 0; code < 64; code++) {
+  const b0 = (code >> 4) & 3, b1 = (code >> 2) & 3, b2 = code & 3;
+  const rcCode = ((3 - b2) << 4) | ((3 - b1) << 2) | (3 - b0);
+  RC_CODON_CHAR_CODE[code] = CODON_CHAR_CODE[rcCode];
+}
+
 /** Reverse complement of an uppercase DNA/IUPAC-ambiguity-code string. */
 function reverseComplement(seq) {
   const n = seq.length;
@@ -75,7 +91,7 @@ function reverseComplement(seq) {
  * '*' so it never silently acts as a stop boundary.
  */
 function translateFrame(seq, offset) {
-  const n = Math.floor((seq.length - offset) / 3);
+  const n = Math.max(0, Math.floor((seq.length - offset) / 3));
   const out = new Uint8Array(n);
   for (let k = 0, i = offset; k < n; k++, i += 3) {
     const b0 = BASE_CODE[seq.charCodeAt(i)];
@@ -89,6 +105,34 @@ function translateFrame(seq, offset) {
 }
 
 /**
+ * Translate reverse-complement reading frame `offset` (0, 1, or 2, meaning
+ * offset into the reverse complement, same convention as translateFrame)
+ * directly against the forward-oriented `seq` — equivalent to
+ * `translateFrame(reverseComplement(seq), offset)` but without ever
+ * materializing the reverse-complement string. The reverse frame's first
+ * codon is the reverse complement of `seq`'s last `3 - offset`-adjusted
+ * window, so this walks `seq` right to left in triplets, each one a single
+ * RC_CODON_CHAR_CODE lookup.
+ */
+function translateReverseFrame(seq, offset) {
+  const n = seq.length;
+  const count = Math.max(0, Math.floor((n - offset) / 3));
+  const out = new Uint8Array(count);
+  let end = n - offset; // exclusive end of the current forward-sequence window
+  for (let k = 0; k < count; k++) {
+    const start = end - 3;
+    const b0 = BASE_CODE[seq.charCodeAt(start)];
+    const b1 = BASE_CODE[seq.charCodeAt(start + 1)];
+    const b2 = BASE_CODE[seq.charCodeAt(start + 2)];
+    out[k] = (b0 < 0 || b1 < 0 || b2 < 0)
+      ? X_CODE
+      : RC_CODON_CHAR_CODE[(b0 << 4) | (b1 << 2) | b2];
+    end = start;
+  }
+  return new TextDecoder().decode(out);
+}
+
+/**
  * All six reading frames (+1,+2,+3 forward, then -1,-2,-3 on the reverse
  * complement) as one continuous amino-acid string each, per the brief's
  * "no separate ORF-calling step" design.
@@ -97,14 +141,13 @@ function translateFrame(seq, offset) {
  * @returns {[string, string, string, string, string, string]}
  */
 function translateSixFrames(seq) {
-  const rc = reverseComplement(seq);
   return [
     translateFrame(seq, 0), translateFrame(seq, 1), translateFrame(seq, 2),
-    translateFrame(rc, 0), translateFrame(rc, 1), translateFrame(rc, 2),
+    translateReverseFrame(seq, 0), translateReverseFrame(seq, 1), translateReverseFrame(seq, 2),
   ];
 }
 
-const exportsObj = { CODON_TABLE, reverseComplement, translateFrame, translateSixFrames };
+const exportsObj = { CODON_TABLE, reverseComplement, translateFrame, translateReverseFrame, translateSixFrames };
 if (typeof module !== 'undefined' && module.exports) module.exports = exportsObj;
 if (typeof self !== 'undefined') {
   self.ClannMAG = self.ClannMAG || {};
