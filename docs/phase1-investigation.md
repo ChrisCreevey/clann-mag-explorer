@@ -55,6 +55,37 @@ This will get refined once real numbers exist (index size, collision rate) — f
 
 Deferred to actual implementation once the pipeline exists (per your answer: build first is being sequenced as design → code, so this is downstream of steps 1–5 above, not blocking them). Will test seed/extend thresholds against six-frame translations of a genome (or a few) not expected to be enriched for these 40 families, per the brief.
 
+## Phase 2 findings — streaming FASTA parsing and per-contig stats (implemented)
+
+Built per the plan above: [src/model/fasta-index.js](../src/model/fasta-index.js) (streaming reader +
+`.fai`-style index, gzip-aware), [src/model/translate.js](../src/model/translate.js) (six-frame translation,
+sentinel-delimited, shared with the future marker-gene module per the brief), and
+[src/model/contig-stats.js](../src/model/contig-stats.js) (GC/GC-skew/tetranucleotide composition/coding-density).
+26 unit tests pass (`node test/run.js`), and the load path is wired into the UI end to end (verified in-browser:
+loading a file renders the assembly summary + per-contig table with no console errors).
+
+**Performance finding, flagged rather than silently shipped**: streaming a realistic synthetic 50 MB assembly
+(4,739 contigs, 500bp–20kb each) end-to-end — parsing, `.fai` index, GC/skew/composition, and six-frame
+translation for the coding-density estimate — took **22.5s** (~2.2 MB/s), dominated by the six-frame translation
+step (confirmed via isolated benchmarking: translation is roughly 3-5x the cost of everything else combined).
+One round of optimization already applied (array-join instead of repeated string `+=` in
+`reverseComplement`/`translateFrame`, cutting translation time ~43%); further gains would need a deeper rewrite
+(numeric/typed-array codon encoding instead of JS string ops) that I haven't done, given this is exactly the
+computation the brief already earmarks as reused, at the same cost, by Phase 3's marker-gene search — so this
+number is a preview of Phase 3's cost too, not just Phase 2's.
+
+**Consequence for the "hundreds of MB" assemblies the brief anticipates**: at this throughput, a 300 MB assembly
+would take on the order of two minutes, blocking the main thread the whole time (no progress UI, no
+responsiveness) since nothing here runs off-thread yet. Worth a decision before Phase 3 compounds the cost:
+- Move the streaming parse + translation to a Web Worker, so the page stays responsive and a real progress bar
+  is possible — doesn't reduce total time, but changes "frozen tab for 2 minutes" into "visible progress".
+- And/or optimize `translateFrame`/`reverseComplement` further with typed arrays and numeric codon lookup instead
+  of string concatenation and object-key hashing — a genuine speed win, not just perceived responsiveness.
+- Both are worth doing before Phase 3 (marker-gene search) adds the seed-and-extend cost on top of the same
+  translation.
+
+Not blocking further Phase 2/3 development, but flagging now rather than after Phase 3 makes it worse.
+
 ## Still open / needs your call before I start writing code
 
 1. **Reduced alphabet scheme** — I'll default to a published one (e.g. Murphy10) unless you have a preference.
