@@ -467,3 +467,54 @@ Verified in-browser with new example coverage (`examples/marker-gene-demo.covera
 taxonomic distances computed correctly (the two demo marker fixtures are genuinely unrelated organisms, so a
 distance of 8 ranks is real signal, not a bug), all five signal columns populated or correctly marked n/a, no
 console errors.
+
+## Phase 7 findings — interactive reassignment
+
+**Scope decision, stated up front rather than silently simplified**: a rectangular drag-select, not a freeform
+lasso. A true lasso is arbitrary-polygon point-in-polygon hit testing — a real feature in its own right, not
+just a naming difference — and a rectangle covers the same "select a visual cluster" need for a teaching tool's
+scatter plot at a fraction of the implementation and testing cost. Recorded in `scatter-geometry.js`'s header,
+not just here.
+
+**Split into testable pure logic vs. DOM glue, the same pattern Phase 3's search code and Phase 5's matching
+logic already used**: `src/model/working-assignment.js` (state transitions: derive the starting assignment,
+reassign a set of contigs to a bin, merge, generate a fresh bin ID — all plain `Map` in, `Map` out, no DOM) and
+`src/viz/scatter-geometry.js` (coordinate scaling and rectangle hit-testing, no DOM) are both fully unit tested;
+`src/viz/scatter.js` is a thin, deliberately minimal layer on top that only builds SVG elements and wires mouse
+events — genuinely hard to unit test meaningfully in Node without a real DOM, so it wasn't, and instead got
+exercised directly in the browser (see below).
+
+**Everything reduces to one primitive**: move a contig, split a bin, merge two bins, and spin a new bin out of a
+flagged cluster all turn out to be the exact same operation — reassign a set of contig IDs to a target bin ID,
+existing or brand new. `working-assignment.js` only exports that one primitive (`reassignContigs`) plus thin
+convenience wrappers (`mergeBins` is just `reassignContigs` over one bin's current members), rather than four
+separate code paths that would all need to stay in sync.
+
+**Starting point for the editable assignment**: the brief doesn't say what a student edits *from* when multiple
+tools were loaded. Decided: the Phase 5 reconciliation's majority vote (a contig with no majority at all — e.g.
+every tool split evenly — starts unassigned rather than arbitrarily picked for it) when 2+ tools are loaded, or
+the single table's own bins otherwise. No bin table loaded at all means nothing to reassign into, so the whole
+section is hidden rather than shown empty — matches the existing `tools.length > 0` gate the outlier-flagging
+card (Phase 6) already uses for the same reason.
+
+**Live recalculation reuses Phase 4's `computeBinSummaries` unchanged** — the working assignment is converted
+back to the same `{contigId, binId}[]` shape via `assignmentToRows` and fed straight through the existing
+completeness/redundancy/N50/tier pipeline. No new "live stats" logic was needed; the existing model functions
+were already pure enough to call again on demand.
+
+**`beforeunload` guard**: a module-level `hasUnsavedReassignments` flag, set only inside the one reassignment
+primitive's call site, checked (not re-registered) by a single `beforeunload` listener attached once at load.
+Verified directly in the browser, not just by code inspection, since a synthetic `beforeunload` dispatch is easy
+to get subtly wrong: dispatching before any reassignment confirmed `defaultPrevented` stays `false` (no nag for
+a student who's only exploring, per the brief's explicit requirement), and after one programmatic drag-select +
+move, confirmed `defaultPrevented` flips to `true`.
+
+**Verified end-to-end in the browser** (not just unit tests, since the DOM-wiring layer has none): loaded the
+demo assembly with both example bin tables (2 tools -> reconciliation -> interactive section appears), performed
+a real rectangular drag over the rendered SVG using coordinate-mapped mouse events, confirmed the selection
+count and target-bin dropdown populated correctly, moved the selection to a different MAG via the dropdown +
+button, and confirmed the working-bins table recalculated immediately with the correct new contig counts and
+total lengths — matching hand-computed expectations from the underlying contig lengths. Axis-switching
+(re-`setDataPoints` with a different scalar) re-rendered all 3 points correctly. No console errors throughout.
+
+**Tests**: 17 new (`working-assignment.test.js`, `scatter-geometry.test.js`) — 126 total, all passing.

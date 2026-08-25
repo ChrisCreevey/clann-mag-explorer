@@ -7,10 +7,10 @@ results from a single assembly. Fifth tool in the [Clann suite](https://chriscre
 [Clann Pangenome Explorer](https://chriscreevey.github.io/clann-pangenome-explorer/), and
 [Clann eDNA Explorer](https://chriscreevey.github.io/clann-edna-explorer/).
 
-**Status: Phase 6 complete (streaming FASTA parsing + per-contig stats + marker-gene identification + bin
-loading/summaries + cross-tool reconciliation + outlier/disagreement flagging), under active development.** See
-[`clann-mag-explorer-brief.md`](clann-mag-explorer-brief.md) for the full design brief and
-[`docs/phase1-investigation.md`](docs/phase1-investigation.md) for the current investigation/planning notes.
+**Status: Phase 7 complete (streaming FASTA parsing + per-contig stats + marker-gene identification + bin
+loading/summaries + cross-tool reconciliation + outlier/disagreement flagging + interactive reassignment), under
+active development.** See [`clann-mag-explorer-brief.md`](clann-mag-explorer-brief.md) for the full design brief
+and [`docs/phase1-investigation.md`](docs/phase1-investigation.md) for the current investigation/planning notes.
 
 ## Architecture
 
@@ -34,6 +34,11 @@ loading/summaries + cross-tool reconciliation + outlier/disagreement flagging), 
   composition/coverage centroid distance, marker-gene unique/redundant contribution, marker-gene taxonomic
   consistency (LCA of provenance taxIDs against `data/scg40-lineage.json`), Kraken2 per-contig disagreement, and
   Phase 5's cross-tool agreement into one ranked per-contig view.
+- Interactive reassignment (`src/model/working-assignment.js`, `src/viz/scatter*.js`) is a live-editable bin
+  assignment layered on top of whatever was loaded: an SVG scatter plot with rectangular drag-select (a
+  simplified lasso — see `scatter-geometry.js`'s header for why), move/merge/new-bin actions, and bin summaries
+  that recalculate immediately from the in-session edits. Arms a `beforeunload` guard on the first reassignment,
+  not before.
 - `test/` is a minimal zero-dependency harness (`node test/run.js`), matching the sibling tools.
 
 ## Repository layout

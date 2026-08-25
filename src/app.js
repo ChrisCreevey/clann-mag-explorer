@@ -9,9 +9,32 @@
 // it). One table gets a single per-bin summary (Phase 4); two or more
 // also get cross-tool reconciliation (Phase 5): bins matched across tools
 // by contig overlap, core/disputed contig sets, and a side-by-side view.
-// Filters and interactive reassignment land in later phases.
+// Phase 6 adds a combined outlier/disagreement view; Phase 7 (this
+// module's newest section, see renderInteractiveSection below) adds a
+// live-editable working bin assignment — a scatter plot with rectangular
+// drag-select (brief's simplified lasso, see scatter-geometry.js), move/
+// merge/split-via-reassignment actions, and bin summaries that
+// recalculate immediately off the current in-session edits rather than
+// the original loaded tables. Filters/search land in a later phase.
 
 const THEME_KEY = 'clann-mag-explorer-theme';
+
+// Session-level interactive-reassignment state — deliberately module-level
+// (not passed around as parameters) since it needs to survive across
+// scatter-plot re-renders and outlives any single render() call. Reset on
+// every fresh assembly load (loadAssembly), including the unsaved-work
+// flag, matching the brief's "the tool must intercept navigation away
+// ... once any reassignment has been made in the session" — a new session
+// starts clean.
+let workingAssignment = new Map();
+let hasUnsavedReassignments = false;
+let scatterPlotHandle = null;
+
+window.addEventListener('beforeunload', (e) => {
+  if (!hasUnsavedReassignments) return;
+  e.preventDefault();
+  e.returnValue = ''; // required by some browsers to trigger the native confirmation dialog
+});
 
 function initTheme() {
   const saved = localStorage.getItem(THEME_KEY);
@@ -187,6 +210,150 @@ function renderReconciliationCard(records, result) {
   `;
 }
 
+/**
+ * Phase 7: builds and wires the live-editable reassignment section — a
+ * scatter plot (brief's "composition, coverage, GC, length" axes; here
+ * per-contig scalars, not the raw 136-dim composition vector, since a
+ * literal scatter can't plot that many dimensions at once — Phase 6's
+ * compositionZ is available as a derived axis instead), rectangular
+ * drag-select, move/merge/new-bin actions, and a working-bins summary
+ * table that recalculates immediately from bin-summary.js against the
+ * current in-session assignment (working-assignment.js), not the
+ * original loaded tables.
+ */
+function initInteractiveSection(records, binTablesByTool, reconciliationResult) {
+  const {
+    deriveInitialAssignment, assignmentToRows, reassignContigs, generateNewBinId, listBinIds,
+  } = window.ClannMAG.workingAssignment;
+  const { computeBinSummaries } = window.ClannMAG.binSummary;
+  const { createScatterPlot } = window.ClannMAG.scatter;
+
+  workingAssignment = deriveInitialAssignment(binTablesByTool, reconciliationResult);
+  hasUnsavedReassignments = false;
+
+  const AXES = {
+    gcContent: { label: 'GC%', get: (r) => r.gcContent * 100 },
+    length: { label: 'Length (log₁₀ bp)', get: (r) => Math.log10(Math.max(1, r.length)) },
+    gcSkew: { label: 'GC skew', get: (r) => r.gcSkew },
+    codingDensity: { label: 'Coding density %', get: (r) => r.codingDensity * 100 },
+    coverage: {
+      label: 'Mean coverage depth',
+      get: (r) => (r.coverageDepths ? r.coverageDepths.reduce((a, b) => a + b, 0) / r.coverageDepths.length : 0),
+    },
+  };
+  const hasCoverage = records.some((r) => r.coverageDepths);
+  const axisKeys = Object.keys(AXES).filter((k) => k !== 'coverage' || hasCoverage);
+  const axisOptionsHtml = (selectedKey) =>
+    axisKeys.map((k) => `<option value="${k}" ${k === selectedKey ? 'selected' : ''}>${AXES[k].label}</option>`).join('');
+
+  const card = document.getElementById('interactive-card');
+  card.innerHTML = `
+    <h3>Refine bins (interactive)</h3>
+    <div class="row-count">Drag on the plot to select a cluster of contigs (a simplified rectangular lasso), then move them to a bin below. Reassignments recalculate bin stats immediately; export of the revised assignment table is a later phase.</div>
+    <div class="row"><label>X axis</label><select id="scatterX">${axisOptionsHtml('gcContent')}</select></div>
+    <div class="row"><label>Y axis</label><select id="scatterY">${axisOptionsHtml('length')}</select></div>
+    <div id="scatterContainer"></div>
+    <div class="row" id="selectionRow" style="display:none"><label id="selectionLabel"></label></div>
+    <div class="row" id="actionRow" style="display:none">
+      <select id="targetBinSelect"></select>
+      <button class="act" id="applyMoveBtn" type="button">Move selected</button>
+      <button class="act" id="clearSelectionBtn" type="button">Clear selection</button>
+    </div>
+    <h4>Current working bins</h4>
+    <div class="row-count" id="workingBinsNote"></div>
+    <div class="table-wrap scroll-panel" id="workingBinsWrap"></div>
+  `;
+
+  function buildDataPoints(xKey, yKey) {
+    return records.map((r) => ({
+      id: r.id, x: AXES[xKey].get(r), y: AXES[yKey].get(r),
+      colorKey: workingAssignment.get(r.id) || 'unbinned',
+    }));
+  }
+
+  function renderWorkingBins() {
+    const { summaries } = computeBinSummaries(records, assignmentToRows(workingAssignment));
+    const rows = summaries
+      .map((b) => `<tr>
+        <td>${b.binId}</td>
+        <td class="num">${b.contigCount.toLocaleString()}</td>
+        <td class="num">${b.totalLength.toLocaleString()}</td>
+        <td class="num">${b.completeness.toFixed(1)}%</td>
+        <td class="num">${b.redundancy.toFixed(1)}%</td>
+        <td>${formatMimagTier(b.mimagTier)}</td>
+      </tr>`)
+      .join('');
+    document.getElementById('workingBinsWrap').innerHTML = `
+      <table class="data-table">
+        <thead><tr><th>Bin</th><th>Contigs</th><th>Length</th><th>Completeness</th><th>Redundancy</th><th>Tier</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    `;
+    const unassignedCount = records.length - workingAssignment.size;
+    document.getElementById('workingBinsNote').textContent =
+      `${summaries.length.toLocaleString()} working bins` +
+      (unassignedCount > 0 ? ` · ${unassignedCount.toLocaleString()} contig(s) not yet assigned to any bin` : '');
+  }
+
+  function refreshTargetBinOptions() {
+    const select = document.getElementById('targetBinSelect');
+    const previousValue = select.value;
+    select.innerHTML = listBinIds(workingAssignment).map((b) => `<option value="${b}">${b}</option>`).join('') +
+      '<option value="__new__">+ New bin…</option>';
+    if ([...select.options].some((o) => o.value === previousValue)) select.value = previousValue;
+  }
+
+  function updateSelectionUI(selectedIds) {
+    const selectionRow = document.getElementById('selectionRow');
+    const actionRow = document.getElementById('actionRow');
+    if (selectedIds.length === 0) {
+      selectionRow.style.display = 'none';
+      actionRow.style.display = 'none';
+      return;
+    }
+    selectionRow.style.display = '';
+    actionRow.style.display = '';
+    document.getElementById('selectionLabel').textContent = `${selectedIds.length.toLocaleString()} contig(s) selected`;
+    refreshTargetBinOptions();
+  }
+
+  scatterPlotHandle = createScatterPlot(
+    document.getElementById('scatterContainer'),
+    buildDataPoints('gcContent', 'length'),
+    { onSelectionChange: updateSelectionUI }
+  );
+
+  function rerenderScatterColors() {
+    const xKey = document.getElementById('scatterX').value;
+    const yKey = document.getElementById('scatterY').value;
+    scatterPlotHandle.setDataPoints(buildDataPoints(xKey, yKey));
+  }
+  document.getElementById('scatterX').addEventListener('change', rerenderScatterColors);
+  document.getElementById('scatterY').addEventListener('change', rerenderScatterColors);
+
+  document.getElementById('applyMoveBtn').addEventListener('click', () => {
+    const selectedIds = scatterPlotHandle.getSelection();
+    if (selectedIds.length === 0) return;
+    let targetBinId = document.getElementById('targetBinSelect').value;
+    if (targetBinId === '__new__') {
+      const name = window.prompt('New bin name:', generateNewBinId(workingAssignment));
+      if (!name) return;
+      targetBinId = name;
+    }
+    workingAssignment = reassignContigs(workingAssignment, selectedIds, targetBinId);
+    hasUnsavedReassignments = true;
+    rerenderScatterColors();
+    scatterPlotHandle.clearSelection();
+    renderWorkingBins();
+  });
+
+  document.getElementById('clearSelectionBtn').addEventListener('click', () => {
+    scatterPlotHandle.clearSelection();
+  });
+
+  renderWorkingBins();
+}
+
 async function renderContigTable(records, binTablesByTool) {
   const sorted = [...records].sort((a, b) => b.length - a.length);
   const totalLength = sorted.reduce((sum, r) => sum + r.length, 0);
@@ -243,6 +410,7 @@ async function renderContigTable(records, binTablesByTool) {
     </div>
     ${reconciliationCard}
     ${outlierCard}
+    ${tools.length > 0 ? '<div class="card" id="interactive-card"></div>' : ''}
     ${perToolBinCards}
     <div class="card">
       <h3>Per-contig properties</h3>
@@ -257,6 +425,8 @@ async function renderContigTable(records, binTablesByTool) {
   `;
   document.getElementById('empty').style.display = 'none';
   explorer.style.display = 'flex';
+
+  if (tools.length > 0) initInteractiveSection(records, binTablesByTool, reconciliationResult);
 }
 
 // Parsing runs in a Worker (src/workers/fasta-worker.js) rather than on the
