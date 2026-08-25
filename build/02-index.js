@@ -128,6 +128,22 @@ function buildRefSeqsBinary(records, familyIndexByName) {
 // contig's search time from ~1.6s to ~0.24s).
 const MAX_HITS_PER_KEY = 20;
 
+// Floor on hits stored per reduced-alphabet key — a key seen only this many
+// times or fewer across the *entire* 39,854-sequence reference set is
+// dropped from the index entirely. Measured at k=8: 57% of populated keys
+// are singletons (exactly 1 raw occurrence anywhere in the reference set),
+// yet a singleton key can only ever seed *one* reference sequence at *one*
+// diagonal — it can never by itself satisfy marker-genes.js's two-hit-per-
+// diagonal requirement, so it only ever matters when a second, independent
+// seed (very plausibly from a different, non-singleton key nearby) also
+// lands on the same diagonal. Dropping singletons (MIN_HITS_PER_KEY=2) cuts
+// the populated-key count roughly in half — a real reduction in shipped
+// index size — for a recall cost that should be small precisely because
+// singleton keys are the ones least likely to be load-bearing on their own.
+// Checked against real assembly data (not just reasoned about) before
+// shipping — see the commit message for the actual measured recall delta.
+const MIN_HITS_PER_KEY = 2;
+
 function buildIndexBinary(records) {
   // Pass 1: gather every hit per key, keyed by a plain Map rather than a
   // dense ALPHABET_SIZE^K-sized array — memory tracks actual populated-key
@@ -144,7 +160,9 @@ function buildIndexBinary(records) {
     });
   }
 
-  const sortedCodes = [...hitsByKey.keys()].sort((a, b) => a - b);
+  const sortedCodes = [...hitsByKey.keys()]
+    .filter((code) => hitsByKey.get(code).length / 2 >= MIN_HITS_PER_KEY)
+    .sort((a, b) => a - b);
   const numPopulatedKeys = sortedCodes.length;
   const sortedKeys = Uint32Array.from(sortedCodes);
 
