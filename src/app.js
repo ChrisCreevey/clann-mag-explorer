@@ -69,6 +69,17 @@ function showError(message) {
   err.textContent = message;
 }
 
+// Header spinner shown whenever any long-running process (currently:
+// loadAssembly's parse + marker-gene search) is in flight. A counter, not
+// a boolean, so overlapping callers (there's only one today, but this is
+// the cheap way to make that not a landmine later) can each set/clear
+// independently without one finishing early hiding it for the other.
+let busyCount = 0;
+function setBusy(active) {
+  busyCount = Math.max(0, busyCount + (active ? 1 : -1));
+  document.getElementById('hSpinner').style.display = busyCount > 0 ? 'inline-block' : 'none';
+}
+
 /** Cheap content-based FASTA check: gzip-aware peek at the first non-blank byte. */
 async function looksLikeFasta(file) {
   const { isGzipped } = window.ClannMAG.fastaIndex;
@@ -664,7 +675,28 @@ function attachAuxiliaryData(records, coverageTable, krakenCalls) {
 // marker search is embarrassingly parallel across contigs.
 const MARKER_POOL_SIZE = Math.max(1, Math.min(navigator.hardwareConcurrency || 4, 8));
 
+/**
+ * Union of every contigId referenced across all loaded bin tables (a
+ * contig kept by any one tool's assignment counts), or null if no bin
+ * table was loaded at all — in which case there's nothing to filter
+ * against, so every contig in the FASTA is kept (the plain assembly-QC-
+ * only workflow). Computed from the already-parsed tables (findAuxiliaryFiles
+ * runs before loadAssembly is ever called — see initFilePicker), then
+ * handed to fasta-worker.js so contigs absent from every bin table are
+ * dropped during the stream itself rather than parsed, six-frame-
+ * translated, and marker-searched only to be discarded afterward.
+ */
+function computeReferencedContigIds(binTablesByTool) {
+  if (!binTablesByTool) return null;
+  const ids = new Set();
+  for (const assignments of binTablesByTool.values()) {
+    for (const { contigId } of assignments) ids.add(contigId);
+  }
+  return ids;
+}
+
 function loadAssembly(file, binTablesByTool, coverageTable, krakenCalls) {
+  const referencedContigIds = computeReferencedContigIds(binTablesByTool);
   return new Promise((resolve, reject) => {
     const worker = new Worker('src/workers/fasta-worker.js');
     const markerWorkers = Array.from({ length: MARKER_POOL_SIZE }, () => new Worker('src/workers/marker-search-worker.js'));
@@ -698,10 +730,12 @@ function loadAssembly(file, binTablesByTool, coverageTable, krakenCalls) {
     function terminateAll() {
       worker.terminate();
       markerWorkers.forEach((w) => w.terminate());
+      setBusy(false);
     }
 
     const records = [];
     const t0 = performance.now();
+    setBusy(true);
     showError(`Parsing ${file.name}… 0 contigs so far`);
     currentAssemblyFile = file;
 
@@ -718,8 +752,11 @@ function loadAssembly(file, binTablesByTool, coverageTable, krakenCalls) {
         showError(null);
         attachAuxiliaryData(records, coverageTable, krakenCalls);
         await renderContigTable(records, binTablesByTool);
+        const excludedNote = msg.summary.excludedCount > 0
+          ? ` · ${msg.summary.excludedCount.toLocaleString()} unreferenced contigs excluded`
+          : '';
         document.getElementById('hMeta').textContent =
-          `${msg.summary.contigCount.toLocaleString()} contigs · ${msg.summary.totalLength.toLocaleString()} bp · parsed in ${elapsed}s`;
+          `${msg.summary.contigCount.toLocaleString()} contigs · ${msg.summary.totalLength.toLocaleString()} bp · parsed in ${elapsed}s${excludedNote}`;
         document.getElementById('hTitle').textContent = file.name;
         terminateAll();
         resolve();
@@ -734,7 +771,7 @@ function loadAssembly(file, binTablesByTool, coverageTable, krakenCalls) {
       terminateAll();
       reject(err);
     };
-    worker.postMessage({ file });
+    worker.postMessage({ file, referencedContigIds });
   });
 }
 
@@ -955,8 +992,64 @@ function initFilePicker() {
   });
 }
 
+/**
+ * Click-to-sort for every `table.data-table` in the page (contig table,
+ * bin summaries, comparison/outlier views, etc. — all of them already
+ * share this one class). Wired via a single delegated listener on
+ * `document` rather than per-table, since tables here are re-rendered
+ * wholesale (innerHTML swaps) as data changes — a delegated listener
+ * keeps working across re-renders with nothing to re-attach. The CSS for
+ * the sorted-column arrow (`.sorted-asc`/`.sorted-desc`) already existed
+ * (styles/main.css) with no JS behind it; this is that missing half.
+ *
+ * First click on a header sorts ascending, a second click on the same
+ * header flips to descending, and clicking a different header restarts
+ * at ascending for that column (clearing the previous column's arrow).
+ * Column type (numeric vs text) is inferred per sort from the cells
+ * actually present, so it stays correct as rows are added/removed/edited
+ * between clicks rather than being decided once up front.
+ */
+function initSortableTables() {
+  document.addEventListener('click', (e) => {
+    const th = e.target.closest('table.data-table thead th');
+    if (!th) return;
+    const table = th.closest('table');
+    const tbody = table.querySelector('tbody');
+    if (!tbody) return;
+    const headerRow = th.parentElement;
+    const headerCells = [...headerRow.children];
+    const colIndex = headerCells.indexOf(th);
+    if (colIndex < 0) return;
+
+    const nextDir = th.classList.contains('sorted-asc') ? 'desc' : 'asc';
+    headerCells.forEach((cell) => cell.classList.remove('sorted-asc', 'sorted-desc'));
+    th.classList.add(nextDir === 'asc' ? 'sorted-asc' : 'sorted-desc');
+
+    const rows = [...tbody.rows];
+    const cellValue = (row) => {
+      const text = (row.cells[colIndex] ? row.cells[colIndex].textContent : '').trim();
+      const num = text === '' ? NaN : Number(text.replace(/[,%]/g, ''));
+      return { text, num };
+    };
+    const values = rows.map(cellValue);
+    const numericCount = values.filter((v) => !Number.isNaN(v.num)).length;
+    const isNumeric = numericCount >= values.length * 0.5; // majority-numeric column, e.g. a few "n/a" cells mixed in with numbers
+
+    const withValues = rows.map((row, i) => ({ row, value: values[i] }));
+    withValues.sort((a, b) => {
+      const aEmpty = isNumeric ? Number.isNaN(a.value.num) : a.value.text === '';
+      const bEmpty = isNumeric ? Number.isNaN(b.value.num) : b.value.text === '';
+      if (aEmpty || bEmpty) return aEmpty - bEmpty; // blank/n-a cells always sink to the bottom, regardless of direction
+      const cmp = isNumeric ? a.value.num - b.value.num : a.value.text.localeCompare(b.value.text);
+      return nextDir === 'asc' ? cmp : -cmp;
+    });
+    for (const { row } of withValues) tbody.appendChild(row);
+  });
+}
+
 document.addEventListener('DOMContentLoaded', () => {
   initTheme();
   initFilePicker();
+  initSortableTables();
 });
 })();

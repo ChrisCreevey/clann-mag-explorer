@@ -49,6 +49,9 @@ header .brand{font-weight:700;text-transform:uppercase;letter-spacing:.03em;font
 header nav{display:flex;align-items:center;gap:14px;flex-wrap:wrap}
 header nav a{color:var(--muted);text-decoration:none;font-size:12.5px;white-space:nowrap}
 header nav a:hover{color:var(--accent)}
+header .spinner{width:13px;height:13px;flex:none;border-radius:50%;
+  border:2px solid var(--line);border-top-color:var(--accent);animation:hspin .7s linear infinite}
+@keyframes hspin{to{transform:rotate(360deg)}}
 header .spacer{flex:1}
 header #uploadBtn{border:1px solid var(--line);background:var(--bg);color:var(--ink);border-radius:6px;
   padding:5px 11px;cursor:pointer;font:inherit;font-size:12.5px}

@@ -12,6 +12,14 @@
 // run in parallel across contigs — this worker keeps record.frames intact
 // (rather than deleting it) so the main thread can hand it off.
 //
+// If any bin table was loaded, app.js hands over the union of every
+// contigId those tables reference (`referencedContigIds`) — contigs the
+// FASTA has but no bin table mentions are dropped right here, before
+// translation/marker-search ever runs on them, rather than parsed in full
+// and filtered out later. streamFasta's own summary always counts every
+// record in the raw file (it increments before calling back), so this
+// worker tracks its own kept-contig totals and reports those instead.
+//
 // importScripts (not <script> tags) since Workers don't share the page's
 // DOM/script context; relative to this file's own location, not the page's.
 importScripts('../model/dna-codes.js', '../model/translate.js', '../model/contig-stats.js', '../model/fasta-index.js');
@@ -21,17 +29,30 @@ const { streamFasta } = self.ClannMAG.fastaIndex;
 const PROGRESS_EVERY = 200; // contigs between progress pings, not every single one
 
 self.onmessage = async (e) => {
-  const { file } = e.data;
+  const { file, referencedContigIds } = e.data;
   let count = 0;
+  let keptContigCount = 0;
+  let keptTotalLength = 0;
   try {
     const summary = await streamFasta(file, (record) => {
+      if (referencedContigIds && !referencedContigIds.has(record.id)) return; // not in any loaded bin table — drop it
       count++;
+      keptContigCount++;
+      keptTotalLength += record.length;
       self.postMessage({ type: 'contig', record });
       if (count % PROGRESS_EVERY === 0) {
         self.postMessage({ type: 'progress', contigsSoFar: count });
       }
     });
-    self.postMessage({ type: 'done', summary });
+    self.postMessage({
+      type: 'done',
+      summary: {
+        ...summary,
+        contigCount: keptContigCount,
+        totalLength: keptTotalLength,
+        excludedCount: summary.contigCount - keptContigCount,
+      },
+    });
   } catch (err) {
     self.postMessage({ type: 'error', message: err.message });
   }
