@@ -113,11 +113,9 @@ function renderBinSummaryCard(records, binAssignments, toolLabel) {
  * overlap and renders the reconciled view — putative MAGs (side by side
  * across tools), and the ranked disputed-contig list.
  */
-function renderReconciliationCard(records, binTablesByTool) {
-  const { reconcileBins } = window.ClannMAG.binReconciliation;
+function renderReconciliationCard(records, result) {
   const { computeCompletenessRedundancy, mimagTier } = window.ClannMAG.binSummary;
   const recordsById = new Map(records.map((r) => [r.id, r]));
-  const result = reconcileBins(binTablesByTool);
   const tools = result.tools;
 
   const magRows = result.putativeMags
@@ -189,7 +187,7 @@ function renderReconciliationCard(records, binTablesByTool) {
   `;
 }
 
-function renderContigTable(records, binTablesByTool) {
+async function renderContigTable(records, binTablesByTool) {
   const sorted = [...records].sort((a, b) => b.length - a.length);
   const totalLength = sorted.reduce((sum, r) => sum + r.length, 0);
   const n50 = computeN50(sorted.map((r) => r.length), totalLength);
@@ -214,7 +212,24 @@ function renderContigTable(records, binTablesByTool) {
   const perToolBinCards = tools
     .map((tool) => renderBinSummaryCard(records, binTablesByTool.get(tool), tools.length > 1 ? tool : null))
     .join('');
-  const reconciliationCard = tools.length > 1 ? renderReconciliationCard(records, binTablesByTool) : '';
+
+  let reconciliationResult = null;
+  if (tools.length > 1) {
+    reconciliationResult = window.ClannMAG.binReconciliation.reconcileBins(binTablesByTool);
+  }
+  const reconciliationCard = reconciliationResult ? renderReconciliationCard(records, reconciliationResult) : '';
+
+  let outlierCard = '';
+  if (tools.length > 0) {
+    const tree = await getTaxonomyTree();
+    const flags = computeOutlierFlags(records, binTablesByTool, reconciliationResult, tree);
+    outlierCard = renderOutlierCard(flags, {
+      hasCoverage: records.some((r) => r.coverageDepths),
+      hasTaxonomy: tree !== null,
+      hasKraken: records.some((r) => r.krakenTaxId != null),
+      hasCrossTool: reconciliationResult !== null,
+    });
+  }
 
   explorer.innerHTML = `
     <div class="card">
@@ -227,6 +242,7 @@ function renderContigTable(records, binTablesByTool) {
       <div class="row"><label>Distinct marker families hit</label><strong>${distinctFamiliesHit} / 40</strong></div>
     </div>
     ${reconciliationCard}
+    ${outlierCard}
     ${perToolBinCards}
     <div class="card">
       <h3>Per-contig properties</h3>
@@ -247,14 +263,31 @@ function renderContigTable(records, binTablesByTool) {
 // main thread — see docs/phase1-investigation.md "Performance follow-ups":
 // same total work, but the page stays responsive and can show live
 // progress instead of freezing for however long a large assembly takes.
-function loadAssembly(file, binTablesByTool) {
+function attachAuxiliaryData(records, coverageTable, krakenCalls) {
+  if (coverageTable) {
+    const depthsByContig = new Map(coverageTable.rows.map((r) => [r.contigId, r.depths]));
+    for (const record of records) {
+      const depths = depthsByContig.get(record.id);
+      if (depths) record.coverageDepths = depths;
+    }
+  }
+  if (krakenCalls) {
+    const taxIdByContig = new Map(krakenCalls.filter((c) => c.classified).map((c) => [c.contigId, c.taxId]));
+    for (const record of records) {
+      const taxId = taxIdByContig.get(record.id);
+      if (taxId != null) record.krakenTaxId = taxId;
+    }
+  }
+}
+
+function loadAssembly(file, binTablesByTool, coverageTable, krakenCalls) {
   return new Promise((resolve, reject) => {
     const worker = new Worker('src/workers/fasta-worker.js');
     const records = [];
     const t0 = performance.now();
     showError(`Parsing ${file.name}… 0 contigs so far`);
 
-    worker.onmessage = (e) => {
+    worker.onmessage = async (e) => {
       const msg = e.data;
       if (msg.type === 'contig') {
         records.push(msg.record);
@@ -263,7 +296,8 @@ function loadAssembly(file, binTablesByTool) {
       } else if (msg.type === 'done') {
         const elapsed = ((performance.now() - t0) / 1000).toFixed(1);
         showError(null);
-        renderContigTable(records, binTablesByTool);
+        attachAuxiliaryData(records, coverageTable, krakenCalls);
+        await renderContigTable(records, binTablesByTool);
         document.getElementById('hMeta').textContent =
           `${msg.summary.contigCount.toLocaleString()} contigs · ${msg.summary.totalLength.toLocaleString()} bp · parsed in ${elapsed}s`;
         document.getElementById('hTitle').textContent = file.name;
@@ -293,26 +327,183 @@ function fileBaseName(name) {
 
 /**
  * Among the files NOT identified as the assembly, content-sniff every one
- * that looks like a contig->bin table (any number — Phase 5's cross-tool
- * reconciliation needs two or more, Phase 4's per-bin summary works with
- * just one) and parse it. The tool label per table comes from its
- * filename — content alone has no field naming which binning tool
- * produced it — de-duplicated if two files share a base name.
- * @returns {Promise<Map<string, {contigId:string,binId:string}[]>|null>}
+ * and route it: any number of contig->bin tables (Phase 4/5), at most one
+ * coverage table (brief's inputs list one coverage table, not per-tool),
+ * and at most one Kraken2 per-contig call file (Phase 6). First match
+ * wins for the single-instance inputs, matching how the assembly pick
+ * itself already works; bin tables collect all matches, labelled by
+ * filename since content alone can't name which tool produced a table.
  */
-async function findAllBinTables(otherFiles) {
+async function findAuxiliaryFiles(otherFiles) {
   const { sniff } = window.ClannMAG.sniff;
   const { parseContigBinTable } = window.ClannMAG.contigBinTable;
+  const { parseCoverageTable } = window.ClannMAG.coverageTable;
+  const { parseKraken2ContigCalls } = window.ClannMAG.kraken2Contigs;
+
   const binTablesByTool = new Map();
+  let coverageTable = null;
+  let krakenCalls = null;
+
   for (const file of otherFiles) {
     const text = await file.text();
-    if (sniff(text).format !== 'contig-bin-table') continue;
-    let label = fileBaseName(file.name);
-    let suffix = 2;
-    while (binTablesByTool.has(label)) label = `${fileBaseName(file.name)} (${suffix++})`;
-    binTablesByTool.set(label, parseContigBinTable(text));
+    const format = sniff(text).format;
+    if (format === 'contig-bin-table') {
+      let label = fileBaseName(file.name);
+      let suffix = 2;
+      while (binTablesByTool.has(label)) label = `${fileBaseName(file.name)} (${suffix++})`;
+      binTablesByTool.set(label, parseContigBinTable(text));
+    } else if (format === 'coverage-table' && !coverageTable) {
+      coverageTable = parseCoverageTable(text);
+    } else if (format === 'kraken2-contigs' && !krakenCalls) {
+      krakenCalls = parseKraken2ContigCalls(text);
+    }
   }
-  return binTablesByTool.size ? binTablesByTool : null;
+  return { binTablesByTool: binTablesByTool.size ? binTablesByTool : null, coverageTable, krakenCalls };
+}
+
+// Fetched once and cached: build/03-taxonomy.js's output, used for the
+// marker-gene taxonomic-consistency check (brief §Marker-gene
+// identification module). ~420KB, small enough to fetch lazily on first
+// use rather than upfront alongside the (much larger) marker search
+// assets, which the Worker already loads in parallel with file parsing.
+let taxonomyTreePromise = null;
+function getTaxonomyTree() {
+  if (!taxonomyTreePromise) {
+    taxonomyTreePromise = window.ClannMAG.markerTaxonomy.loadTaxonomyTree('data/').catch((err) => {
+      console.warn('marker-gene taxonomy tree failed to load:', err.message);
+      return null;
+    });
+  }
+  return taxonomyTreePromise;
+}
+
+/**
+ * Combines every per-contig signal this app computes (brief §Outlier and
+ * disagreement flagging: "overlaid with the cross-tool agreement signal
+ * ... combined with the other signals") into one ranked list: composition/
+ * coverage centroid distance (outliers.js), marker contribution
+ * (unique/redundant, bin-summary.js), marker-gene taxonomic consistency
+ * (marker-taxonomy.js, if the lineage tree loaded), Kraken2 disagreement
+ * (bin-summary.js, if a per-contig call file was loaded), and cross-tool
+ * agreement (bin-reconciliation.js, if 2+ bin tables were loaded) — each
+ * "hot" signal increments a contig's flagCount, the primary sort key.
+ *
+ * The contig grouping used as "the bin" for centroid/marker-contribution
+ * purposes is the reconciled putative MAG's full contig set (core +
+ * disputed) when 2+ tools are loaded, or the single table's own bins
+ * otherwise — the best available guess at "this genome" either way.
+ */
+function computeOutlierFlags(records, binTablesByTool, reconciliation, tree) {
+  const recordsById = new Map(records.map((r) => [r.id, r]));
+  const groups = [];
+
+  if (reconciliation) {
+    for (const mag of reconciliation.putativeMags) {
+      groups.push({ groupLabel: mag.magId, contigIds: [...mag.coreContigIds, ...mag.disputedContigIds] });
+    }
+  } else if (binTablesByTool) {
+    const [[, onlyTable]] = binTablesByTool;
+    const byBin = new Map();
+    for (const { contigId, binId } of onlyTable) {
+      if (!byBin.has(binId)) byBin.set(binId, []);
+      byBin.get(binId).push(contigId);
+    }
+    for (const [binId, contigIds] of byBin) groups.push({ groupLabel: binId, contigIds });
+  }
+
+  const { computeBinOutliers } = window.ClannMAG.outliers;
+  const { computeMarkerContributions, computeKrakenDisagreement } = window.ClannMAG.binSummary;
+  const { computeBinTaxonomicConsistency } = window.ClannMAG.markerTaxonomy;
+
+  const agreementByContig = new Map();
+  if (reconciliation) for (const c of reconciliation.contigAgreement) agreementByContig.set(c.contigId, c);
+
+  const flags = [];
+  for (const group of groups) {
+    const groupContigs = group.contigIds.map((id) => recordsById.get(id)).filter(Boolean);
+    if (groupContigs.length === 0) continue;
+
+    const zScores = computeBinOutliers(groupContigs);
+    const contributions = computeMarkerContributions(groupContigs);
+    const krakenFlags = computeKrakenDisagreement(groupContigs);
+    const taxConsistency = tree ? computeBinTaxonomicConsistency(groupContigs, tree) : null;
+
+    for (const contig of groupContigs) {
+      const z = zScores.get(contig.id);
+      const contribution = contributions.get(contig.id);
+      const taxDistance = (taxConsistency && taxConsistency.perContigDistance.get(contig.id)) ?? null;
+      const krakenDisagrees = krakenFlags.get(contig.id) || false;
+      const agreement = agreementByContig.get(contig.id) || null;
+
+      let flagCount = 0;
+      if (z.combinedZ > 2) flagCount++;
+      if (contribution.redundantFamilies.length > 0 && contribution.uniqueFamilies.length === 0) flagCount++;
+      if (taxDistance !== null && taxDistance > 0) flagCount++;
+      if (krakenDisagrees) flagCount++;
+      if (agreement && agreement.agreementFraction < 1) flagCount++;
+
+      flags.push({
+        contigId: contig.id, groupLabel: group.groupLabel,
+        compositionZ: z.compositionZ, coverageZ: z.coverageZ, combinedZ: z.combinedZ,
+        uniqueCount: contribution.uniqueFamilies.length, redundantCount: contribution.redundantFamilies.length,
+        taxDistance, krakenDisagrees, agreementFraction: agreement ? agreement.agreementFraction : null,
+        flagCount,
+      });
+    }
+  }
+
+  flags.sort((a, b) => b.flagCount - a.flagCount || b.combinedZ - a.combinedZ);
+  return flags;
+}
+
+function renderOutlierCard(flags, { hasCoverage, hasTaxonomy, hasKraken, hasCrossTool }) {
+  const ROW_LIMIT = 150;
+  const rows = flags
+    .slice(0, ROW_LIMIT)
+    .map((f) => `<tr>
+      <td>${f.contigId}</td>
+      <td>${f.groupLabel}</td>
+      <td class="num">${f.compositionZ.toFixed(2)}</td>
+      <td class="num">${f.coverageZ === null ? '<span class="hint">n/a</span>' : f.coverageZ.toFixed(2)}</td>
+      <td class="num">${f.uniqueCount}</td>
+      <td class="num">${f.redundantCount}</td>
+      <td class="num">${f.taxDistance === null ? '<span class="hint">n/a</span>' : f.taxDistance}</td>
+      <td>${f.krakenDisagrees ? '⚠' : ''}</td>
+      <td class="num">${f.agreementFraction === null ? '<span class="hint">n/a</span>' : `${(f.agreementFraction * 100).toFixed(0)}%`}</td>
+      <td class="num"><strong>${f.flagCount}</strong></td>
+    </tr>`)
+    .join('');
+
+  const notes = [
+    'composition Z is always available',
+    hasCoverage ? 'coverage Z from the loaded coverage table' : 'coverage Z: n/a, no coverage table loaded',
+    hasTaxonomy ? 'marker taxonomic distance from the loaded lineage table' : 'marker taxonomic distance: n/a, lineage table failed to load',
+    hasKraken ? 'Kraken2 disagreement from the loaded per-contig calls' : 'Kraken2 disagreement: n/a, no per-contig Kraken2 file loaded',
+    hasCrossTool ? 'cross-tool agreement from the reconciled bin tables' : 'cross-tool agreement: n/a, load 2+ bin tables to enable',
+  ];
+
+  return `
+    <div class="card">
+      <h3>Outlier &amp; disagreement flagging</h3>
+      <div class="row-count">${flags.length.toLocaleString()} contigs scored${flags.length > ROW_LIMIT ? `, showing the top ${ROW_LIMIT} by flag count` : ''} &middot; ${notes.join(' &middot; ')}</div>
+      <div class="table-wrap scroll-panel">
+        <table class="data-table">
+          <thead><tr>
+            <th>Contig</th><th>Bin / MAG</th>
+            <th title="Standard deviations from this bin's composition centroid">Comp Z</th>
+            <th title="Standard deviations from this bin's coverage centroid">Cov Z</th>
+            <th title="Marker families found only on this contig within its bin">Unique</th>
+            <th title="Marker families also found elsewhere in this bin">Redundant</th>
+            <th title="How far this contig's marker provenance sits from the rest of its bin's consensus lineage">Tax dist.</th>
+            <th title="This contig's Kraken2 call disagrees with its bin's majority call">Kraken</th>
+            <th title="Cross-tool agreement fraction (Phase 5)">Agreement</th>
+            <th title="Count of signals flagged for this contig">Flags</th>
+          </tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+    </div>
+  `;
 }
 
 function initFilePicker() {
@@ -332,10 +523,12 @@ function initFilePicker() {
       return;
     }
     const otherFiles = files.filter((f) => f !== assemblyFile);
-    const binTablesByTool = otherFiles.length ? await findAllBinTables(otherFiles) : null;
+    const { binTablesByTool, coverageTable, krakenCalls } = otherFiles.length
+      ? await findAuxiliaryFiles(otherFiles)
+      : { binTablesByTool: null, coverageTable: null, krakenCalls: null };
 
     try {
-      await loadAssembly(assemblyFile, binTablesByTool);
+      await loadAssembly(assemblyFile, binTablesByTool, coverageTable, krakenCalls);
     } catch {
       // already surfaced via showError inside loadAssembly
     }

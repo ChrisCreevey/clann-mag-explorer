@@ -390,3 +390,80 @@ example bin table (`examples/marker-gene-demo.bins2.tsv`, deliberately disagreei
 `contig_2`) loaded alongside the assembly and the first table: 2 putative MAGs matched correctly, `contig_2`
 correctly flagged as the sole disputed contig at 50% agreement, both per-tool bin-summary cards and the
 reconciliation card rendered with no console errors.
+
+## Phase 6 findings — outlier flagging and taxonomic overlay
+
+Five signals, per the brief, combined into one ranked per-contig view rather than five separate ones — matching
+the brief's own framing ("a contig that is both a statistical outlier and cross-tool disputed is flagged as the
+strongest reassignment candidate").
+
+**`build/03-taxonomy.js`, deferred in Phase 3, implemented now that Phase 6 actually needs it**: downloads the
+current NCBI taxdump (~78MB, build-time only), resolves the 1,753 distinct taxIDs referenced across
+`reference-data/scg40_raw.fasta`'s headers plus every ancestor up to root (5,028 nodes total; 24 taxIDs had been
+merged forward, 0 were dead), ships `data/scg40-lineage.json` (JSON, not binary — 419KB was well within the
+"small enough" bound flagged as an open question back in Phase 1). `src/model/marker-taxonomy.js` builds a
+`taxonomy-tree.js` `TaxonomyTree` from it (parent-before-child insertion order, since input rows aren't
+topologically sorted) and reuses that class's `lca()` — the exact function Phase 3 wrote because the eDNA
+Explorer's port had the tree shape but no LCA — to compute each bin's marker-provenance consensus lineage.
+
+**A real math bug caught by working through the proof, not by a failing test**: the first version of the
+per-contig taxonomic-distance metric combined a contig's own provenance taxIDs with the *whole-bin* consensus
+taxID and measured how far that combination sat from the consensus. That's provably a no-op: the whole-bin LCA
+is by construction an ancestor of every subset's LCA (including any single contig's), so adding it back into a
+subset's own LCA can only ever return the consensus itself — verified directly (`t.lca([11, consensus])` really
+does just return `consensus`) before it shipped as dead code with zero actual signal. Fixed with a **leave-one-
+out** design instead: compare each contig's own provenance against the LCA of *every other contig in the bin*,
+which isn't fixed relative to the contig being scored, so combining pulls the comparison point up exactly when,
+and only when, this contig's markers genuinely disagree with the rest.
+
+**Composition/coverage outliers** (`src/model/outliers.js`): per-bin centroid distance expressed as a z-score
+(standard deviations above the bin's own mean distance), not a raw distance — makes a naturally tight bin and a
+naturally diffuse one comparable on the same scale. Composition and coverage z-scores are combined via `max()`,
+not average, deliberately: either axis alone being unusual is real signal, and averaging would dilute a contig
+that's a strong outlier on just one axis. Coverage is only used when *every* contig in the bin has depth data
+(brief's optional input); otherwise the combined score falls back to composition alone rather than partially
+scoring a mix.
+
+**Coverage table parser** finally implemented (`src/parsers/coverage-table.js`), including MetaBAT2's real
+`jgi_summarize_bam_contig_depths` shape (`contigName/contigLen/totalAvgDepth/sample.bam/sample.bam-var/...` —
+interleaved depth/variance columns), not just a generic numeric table. `sniff.js` disambiguates it from a
+2-column contig->bin table using the column-count heuristic already documented back in Phase 1 (2 columns
+defaults to contig-bin-table; 3+ columns, or a coverage-shaped header, is a coverage table).
+
+**Kraken2 per-contig parser, a documented scope decision, not the brief's literal wording**: the brief says this
+input "reuses the eDNA Explorer's Kraken2 report parser" — but that parser (`breport.js`) reads Kraken2's
+*aggregate* `.breport` (one row per taxon across the whole run, no per-query field at all), which structurally
+cannot answer "what did Kraken2 call this specific contig." What actually carries a per-query call is Kraken2's
+other standard output format (`--output`, not `--report`): one row per query, `C/U`, seq ID, taxID, length, LCA
+string. `src/parsers/kraken2-contigs.js` parses that instead, with the scope note recorded in the file itself,
+not just here. The taxonomic-disagreement check built on it is deliberately simple — exact-taxID majority-vote
+mismatch within a bin, not lineage-aware — since a real lineage-aware version would need a tree covering
+whatever arbitrary taxa Kraken2's full database can call, unlike the marker-gene provenance check (which only
+ever touches the ~5,000 taxa this app's own fixed 40-family reference set references). Flagged as a possible
+future upgrade if a student also loads a full-run `.breport` alongside the per-contig file, not built now.
+
+**Per-contig marker contribution** (`src/model/bin-summary.js`'s `computeMarkerContributions`): straightforward
+given Phase 3's per-contig tags already exist — unique (found on no other contig in the bin) vs. redundant
+(found elsewhere too), the exact "low-risk removal candidate" signal the brief describes.
+
+**UI**: one new "Outlier & disagreement flagging" card, not five, sorted by a `flagCount` (how many of the five
+signals are "hot" for that contig) then by combined composition/coverage z-score. Uses the reconciled putative
+MAG's full contig set (core + disputed) as "the bin" for centroid/marker-contribution purposes when 2+ tools are
+loaded, or the single table's own bins otherwise — the best available guess at "this genome" either way. Only
+rendered when at least one bin table is loaded, since every signal here is relative to a bin.
+
+**A real bug caught by browser testing, not the unit tests**: an empty-bin edge case (a putative MAG whose only
+contig has no marker calls at all) made `computeBinTaxonomicConsistency` return an empty `Map`, so
+`.get(contigId)` came back `undefined` rather than the function's documented `null` — and the render code's
+`=== null` check missed it, printing the literal string "undefined" in the table. Every one of
+`marker-taxonomy.test.js`'s unit tests happened to exercise bins with at least one contig lacking a call, but
+never one where the *entire* group has none — the exact gap between unit coverage and an end-to-end run with
+real (sparse, uneven) demo data. Fixed with `?? null` at the call site.
+
+**Tests**: 32 new (`coverage-table.test.js`, `kraken2-contigs.test.js`, `outliers.test.js`,
+`marker-taxonomy.test.js`, plus additions to `bin-summary.test.js` and `sniff.test.js`) — 109 total, all passing.
+Verified in-browser with new example coverage (`examples/marker-gene-demo.coverage.tsv`) and Kraken2
+(`examples/marker-gene-demo.kraken2.tsv`) files loaded alongside both existing bin tables: real NCBI-derived
+taxonomic distances computed correctly (the two demo marker fixtures are genuinely unrelated organisms, so a
+distance of 8 ranks is real signal, not a bug), all five signal columns populated or correctly marked n/a, no
+console errors.

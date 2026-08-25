@@ -60,6 +60,76 @@ function computeCompletenessRedundancy(binContigs) {
   return { completeness, redundancy, familiesFound };
 }
 
+/**
+ * Per-contig marker contribution (brief §Marker-gene identification
+ * module — "the distinctive output beyond a bin-level number"): for each
+ * contig, which of its called families are found on no other contig in
+ * the same bin (unique — removing this contig loses completeness) versus
+ * also found elsewhere in the bin (redundant — removing this contig
+ * reduces apparent contamination without costing completeness). A contig
+ * with high redundant and zero unique contribution is a low-risk removal
+ * candidate.
+ * @param {object[]} binContigs - this bin's per-contig records
+ * @returns {Map<string, {uniqueFamilies:string[], redundantFamilies:string[]}>} keyed by contig id
+ */
+function computeMarkerContributions(binContigs) {
+  const contigsByFamily = new Map(); // family -> Set<contigId>
+  for (const contig of binContigs) {
+    for (const hit of contig.markerHits || []) {
+      if (!contigsByFamily.has(hit.family)) contigsByFamily.set(hit.family, new Set());
+      contigsByFamily.get(hit.family).add(contig.id);
+    }
+  }
+
+  const contributions = new Map();
+  for (const contig of binContigs) {
+    const uniqueFamilies = [];
+    const redundantFamilies = [];
+    for (const hit of contig.markerHits || []) {
+      const contigsWithThisFamily = contigsByFamily.get(hit.family);
+      if (contigsWithThisFamily.size > 1) redundantFamilies.push(hit.family);
+      else uniqueFamilies.push(hit.family);
+    }
+    contributions.set(contig.id, { uniqueFamilies, redundantFamilies });
+  }
+  return contributions;
+}
+
+/**
+ * Taxonomic-disagreement flag (brief §Outlier and disagreement flagging):
+ * a contig whose Kraken2 call differs from the rest of its bin. Scope
+ * decision: exact-taxID majority-vote mismatch, not lineage-aware (e.g.
+ * two different species in the same genus would still count as a
+ * "disagreement" here). A full lineage-aware version needs a taxonomy
+ * tree covering whatever arbitrary taxIDs Kraken2's default database
+ * calls — unlike the marker-gene provenance check (marker-taxonomy.js),
+ * which only ever needs the ~5,000 taxa this app's own fixed 40-family
+ * reference set touches, Kraken2 can call anything in NCBI's full
+ * taxonomy. Shipping that whole tree is out of scope here; a real
+ * lineage-aware upgrade is possible if a student also loads a full-run
+ * .breport alongside the per-contig calls (breport.js already builds a
+ * real taxonomy-tree.js from one, per the eDNA Explorer port) — noted as
+ * a follow-up, not built now.
+ * @param {object[]} binContigs - per-contig records with an optional
+ *   `krakenTaxId: number` (from kraken2-contigs.js)
+ * @returns {Map<string, boolean>} contigId -> true if this contig's call
+ *   disagrees with the bin's majority call (only set for contigs that
+ *   have a call at all, in a bin where at least 2 contigs do)
+ */
+function computeKrakenDisagreement(binContigs) {
+  const withCalls = binContigs.filter((c) => c.krakenTaxId != null);
+  const disagreement = new Map();
+  if (withCalls.length < 2) return disagreement;
+
+  const counts = new Map();
+  for (const c of withCalls) counts.set(c.krakenTaxId, (counts.get(c.krakenTaxId) || 0) + 1);
+  let majorityTaxId = null, majorityCount = 0;
+  for (const [taxId, count] of counts) if (count > majorityCount) { majorityCount = count; majorityTaxId = taxId; }
+
+  for (const c of withCalls) disagreement.set(c.id, c.krakenTaxId !== majorityTaxId);
+  return disagreement;
+}
+
 function mimagTier(completeness, contamination, thresholds) {
   const t = { ...DEFAULT_MIMAG_THRESHOLDS, ...thresholds };
   if (completeness > t.highMinCompleteness && contamination < t.highMaxContamination) return 'high';
@@ -112,7 +182,8 @@ function computeBinSummaries(contigRecords, assignments, options = {}) {
 
 const exportsObj = {
   TOTAL_MARKER_FAMILIES, DEFAULT_MIMAG_THRESHOLDS,
-  computeN50L50, computeCompletenessRedundancy, mimagTier, computeBinSummaries,
+  computeN50L50, computeCompletenessRedundancy, computeMarkerContributions, computeKrakenDisagreement,
+  mimagTier, computeBinSummaries,
 };
 if (typeof module !== 'undefined' && module.exports) module.exports = exportsObj;
 if (typeof self !== 'undefined') {

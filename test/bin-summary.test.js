@@ -1,6 +1,7 @@
 const { test, report, assert } = require('./harness');
 const {
-  computeN50L50, computeCompletenessRedundancy, mimagTier, computeBinSummaries,
+  computeN50L50, computeCompletenessRedundancy, computeMarkerContributions, computeKrakenDisagreement,
+  mimagTier, computeBinSummaries,
 } = require('../src/model/bin-summary');
 
 test('computeN50L50 on a simple descending length list', () => {
@@ -44,6 +45,64 @@ test('computeCompletenessRedundancy handles contigs with no marker hits at all',
   assert.strictEqual(familiesFound, 0);
   assert.strictEqual(completeness, 0);
   assert.strictEqual(redundancy, 0); // no division by zero
+});
+
+test('computeMarkerContributions: a family found on only one contig is that contig\'s unique contribution', () => {
+  const binContigs = [
+    { id: 'c1', markerHits: [{ family: 'COG0012' }] },
+    { id: 'c2', markerHits: [{ family: 'COG0016' }] },
+  ];
+  const contributions = computeMarkerContributions(binContigs);
+  assert.deepStrictEqual(contributions.get('c1'), { uniqueFamilies: ['COG0012'], redundantFamilies: [] });
+  assert.deepStrictEqual(contributions.get('c2'), { uniqueFamilies: ['COG0016'], redundantFamilies: [] });
+});
+
+test('computeMarkerContributions: a family found on multiple contigs is redundant on all of them', () => {
+  const binContigs = [
+    { id: 'c1', markerHits: [{ family: 'COG0012' }] },
+    { id: 'c2', markerHits: [{ family: 'COG0012' }] },
+  ];
+  const contributions = computeMarkerContributions(binContigs);
+  assert.deepStrictEqual(contributions.get('c1'), { uniqueFamilies: [], redundantFamilies: ['COG0012'] });
+  assert.deepStrictEqual(contributions.get('c2'), { uniqueFamilies: [], redundantFamilies: ['COG0012'] });
+});
+
+test('computeMarkerContributions: a contig can have both unique and redundant families at once', () => {
+  const binContigs = [
+    { id: 'c1', markerHits: [{ family: 'COG0012' }, { family: 'COG0016' }] },
+    { id: 'c2', markerHits: [{ family: 'COG0012' }] }, // shares COG0012 with c1 -> redundant on both
+  ];
+  const contributions = computeMarkerContributions(binContigs);
+  assert.deepStrictEqual(contributions.get('c1'), { uniqueFamilies: ['COG0016'], redundantFamilies: ['COG0012'] });
+});
+
+test('computeMarkerContributions: a contig with no marker hits contributes nothing either way', () => {
+  const binContigs = [{ id: 'c1', markerHits: [] }, { id: 'c2' }];
+  const contributions = computeMarkerContributions(binContigs);
+  assert.deepStrictEqual(contributions.get('c1'), { uniqueFamilies: [], redundantFamilies: [] });
+  assert.deepStrictEqual(contributions.get('c2'), { uniqueFamilies: [], redundantFamilies: [] });
+});
+
+test('computeKrakenDisagreement flags the minority call(s), not the majority', () => {
+  const binContigs = [
+    { id: 'c1', krakenTaxId: 562 }, { id: 'c2', krakenTaxId: 562 }, { id: 'c3', krakenTaxId: 999 },
+  ];
+  const disagreement = computeKrakenDisagreement(binContigs);
+  assert.strictEqual(disagreement.get('c1'), false);
+  assert.strictEqual(disagreement.get('c2'), false);
+  assert.strictEqual(disagreement.get('c3'), true);
+});
+
+test('computeKrakenDisagreement returns no flags when fewer than 2 contigs have a call', () => {
+  const disagreement = computeKrakenDisagreement([{ id: 'c1', krakenTaxId: 562 }, { id: 'c2' }]);
+  assert.strictEqual(disagreement.size, 0);
+});
+
+test('computeKrakenDisagreement ignores contigs with no call at all', () => {
+  const binContigs = [{ id: 'c1', krakenTaxId: 562 }, { id: 'c2', krakenTaxId: 562 }, { id: 'c3' }];
+  const disagreement = computeKrakenDisagreement(binContigs);
+  assert.strictEqual(disagreement.has('c3'), false);
+  assert.strictEqual(disagreement.get('c1'), false);
 });
 
 test('mimagTier: high quality needs both completeness and contamination clear', () => {

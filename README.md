@@ -7,8 +7,8 @@ results from a single assembly. Fifth tool in the [Clann suite](https://chriscre
 [Clann Pangenome Explorer](https://chriscreevey.github.io/clann-pangenome-explorer/), and
 [Clann eDNA Explorer](https://chriscreevey.github.io/clann-edna-explorer/).
 
-**Status: Phase 5 complete (streaming FASTA parsing + per-contig stats + marker-gene identification + bin
-loading/summaries + cross-tool reconciliation), under active development.** See
+**Status: Phase 6 complete (streaming FASTA parsing + per-contig stats + marker-gene identification + bin
+loading/summaries + cross-tool reconciliation + outlier/disagreement flagging), under active development.** See
 [`clann-mag-explorer-brief.md`](clann-mag-explorer-brief.md) for the full design brief and
 [`docs/phase1-investigation.md`](docs/phase1-investigation.md) for the current investigation/planning notes.
 
@@ -23,12 +23,17 @@ loading/summaries + cross-tool reconciliation), under active development.** See
   and via `importScripts()` inside the worker.
 - `build/` holds an **offline, Node-based** build pipeline (not part of the zero-dependency deployed site) that
   turns `reference-data/scg40_raw.fasta` into the static marker-gene search assets shipped in `data/`
-  (`node build/01-cluster.js && node build/02-index.js`, ~25s total). `data/*.bin` are committed — GitHub Pages
-  serves them directly, no CI build step. See `docs/phase1-investigation.md` §4-5 and "Phase 3 findings" for what
-  each script does, the binary formats, and the performance tuning behind the current parameters.
+  (`node build/01-cluster.js && node build/02-index.js`, ~25s total; `node build/03-taxonomy.js` separately,
+  ~20s, downloads the current NCBI taxdump). `data/*.bin`/`data/*.json` are committed — GitHub Pages serves them
+  directly, no CI build step. See `docs/phase1-investigation.md` §4-5 and "Phase 3/6 findings" for what each
+  script does, the binary formats, and the performance tuning behind the current parameters.
 - Marker-gene search (seed-and-extend against a Murphy10-reduced-alphabet index, BLOSUM62 extension, three
   paralog-safety checks) runs inside the same Worker as parsing, reusing the six-frame translation
   `contig-stats.js` already computes rather than recomputing it.
+- Outlier/disagreement flagging (`src/model/outliers.js`, `src/model/marker-taxonomy.js`) combines
+  composition/coverage centroid distance, marker-gene unique/redundant contribution, marker-gene taxonomic
+  consistency (LCA of provenance taxIDs against `data/scg40-lineage.json`), Kraken2 per-contig disagreement, and
+  Phase 5's cross-tool agreement into one ranked per-contig view.
 - `test/` is a minimal zero-dependency harness (`node test/run.js`), matching the sibling tools.
 
 ## Repository layout
