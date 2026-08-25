@@ -556,4 +556,49 @@ near-identical pair (`compositionSimilarity: 1, likelyDuplicate: true`) while co
 against the distinct third MAG (`compositionSimilarity: 0.69, likelyDuplicate: false`). No console errors in
 either path. All 134 tests pass (8 new, across `test/mag-redundancy.test.js` and `test/qc-comparison.test.js`).
 
+## Phase 9 findings — export and site chrome
+
+**About/FAQ, header/footer layout, and the responsive breakpoint already existed** in `index.html`/`styles/main.css`
+before this session — built early (matching the eDNA Explorer's chrome) rather than deferred to last, unlike the
+brief's phase ordering. Phase 9's actual remaining scope was the three export outputs only; no site-chrome work
+was needed.
+
+**FASTA extraction reuses the original bytes verbatim rather than reformatting.** `fasta-index.js`'s `faiEntry`
+already records each contig's first-sequence-line byte offset plus its line width/wrapping — so
+`computeSequenceByteSpan` (`src/model/fasta-extract.js`) only needs to compute *how many bytes* of the original
+file cover a contig's sequence lines (accounting for a possibly-shorter last line), then that exact byte range —
+newlines and all — is sliced straight out and reused under a new header. No re-wrapping logic was needed because
+the original wrapping is already correct; the arithmetic was verified by hand for four cases (exactly one full
+line, several full lines plus a short remainder, an exact multiple of the line width, and CRLF line endings)
+before trusting the browser test, following the Phase 5/6 lesson above about checking metric arithmetic by hand
+rather than trusting a first-draft test.
+
+**Non-uniform-wrapping contigs are skipped from extraction, not guessed at.** `faiEntry.uniform === false` means
+the file's line lengths weren't consistent for that contig, so there's no single "bytes per line" to compute a
+byte span from without literally re-scanning the file — which would defeat the whole point of slicing off the
+existing index. `computeSequenceByteSpan` returns `null` in that case; `planFastaExtraction` collects those as
+`skippedContigIds` per group, and the UI surfaces an explicit "N contig(s) skipped (non-uniform FASTA line
+wrapping...)" note rather than silently producing a truncated or corrupt sequence.
+
+**Export always reads the live `workingAssignment`, not the originally loaded bin tables** — same pattern as
+Phase 7's live-recalculating stats table, and matches the brief's explicit "revised... table, reflecting any
+manual reassignment made in the session" wording. No separate "export original" option was built since nothing in
+the brief asked for one.
+
+**Verified end-to-end in the browser** against the real example dataset (`examples/marker-gene-demo.*`, loaded via
+a synthetic `DataTransfer` file-input event): (1) clicked the assignment-CSV and bin-summary-CSV export buttons
+with `URL.createObjectURL` monkey-patched to capture the generated Blobs instead of letting the browser save them
+— confirmed the assignment CSV listed all 3 contigs against their reconciled MAGs, and the summary CSV's numbers
+matched the on-page reconciliation table exactly. (2) Clicked "Download bin FASTA" for `MAG_1` — confirmed the
+extracted multi-FASTA had both of `MAG_1`'s contigs under their original headers with original line wrapping
+intact, zero skipped contigs, and (checked by hand against the raw source file's own sequences) the extracted
+sequence lengths (1889 + 1581 = 3470 bp) matched `MAG_1`'s own reported total length exactly. (3) Resized the
+viewport to a 375×812 mobile preset and reloaded the same data — confirmed the assembly summary, reconciliation
+table, and the new export card all render legibly stacked single-column with wide tables scrolling inside their
+own container rather than the page. No console errors in any path. All 145 tests pass (9 new, across
+`test/fasta-extract.test.js` and `test/export-csv.test.js`).
+
+This closes out all 9 phases of the brief's plan. See `docs/HANDOVER.md`'s "Open items still worth doing" for
+what's left (real-data calibration follow-ups, not scoped phase work).
+
 **Tests**: 17 new (`working-assignment.test.js`, `scatter-geometry.test.js`) — 126 total, all passing.

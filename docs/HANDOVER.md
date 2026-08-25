@@ -7,8 +7,8 @@ territory). The original spec is [`clann-mag-explorer-brief.md`](../clann-mag-ex
 
 ## Where things stand
 
-Phases 1–7 of the brief's 9-phase plan are done. All 126 tests pass (`node test/run.js`), the working tree is
-clean, and the app has been verified end-to-end in a real browser at every phase (not just unit-tested).
+All 9 phases of the brief's plan are done. All 145 tests pass (`node test/run.js`), the working tree is clean,
+and the app has been verified end-to-end in a real browser at every phase (not just unit-tested).
 
 | Phase | What it added | Status |
 |---|---|---|
@@ -22,10 +22,11 @@ clean, and the app has been verified end-to-end in a real browser at every phase
 | 6 | Outlier flagging (composition/coverage/marker/taxonomy/Kraken2) | Done |
 | 7 | Interactive reassignment (scatter + drag-select + live stats) | Done |
 | 8 | Comparison views and QC across the full set | Done |
-| 9 | Export and site chrome (About/FAQ, responsive pass) | **Not started** |
+| 9 | Export and site chrome (About/FAQ, responsive pass) | Done |
 
-Run `node test/run.js` to confirm nothing regressed before you start. Every commit on `main` so far is one phase
-(`git log --oneline` shows the full sequence) — keep that convention if it still makes sense.
+There is no more scoped phase work from the brief. If you're picking this up next, the likely next step is either
+(a) the calibration/real-data follow-ups in "Open items still worth doing" below, or (b) whatever new request
+brought you here — run `node test/run.js` first either way to confirm nothing regressed.
 
 ## Architecture, in one paragraph
 
@@ -104,59 +105,46 @@ Node-based offline pipeline (allowed to use Node built-ins freely — it's never
   the full NCBI taxonomy. It's fine for marker-gene provenance lineage; it is *not* usable for general Kraken2
   taxID lookups (see previous point).
 - **The `beforeunload` guard arms on the first *reassignment* specifically**, via one module-level flag in
-  `app.js` set only inside `working-assignment.js`'s single mutation primitive — not on filter/search state
-  changes (there are none yet; if Phase 8/9 adds any, decide deliberately whether they should also arm it, per
-  the brief's own open question on this).
+  `app.js` set only inside `working-assignment.js`'s single mutation primitive — not on filter/search state.
+  Phases 8/9 added no new mutable session state that changes what's on disk if lost, so this was kept as-is.
 - **No coverage-aware outlier signal unless a coverage table was loaded**, and even then only when *every*
   contig in a bin has depth data — falls back to composition-only rather than partially scoring a mix. See
   `outliers.js`.
+- **Phase 8's MAG-redundancy check uses composition similarity, not marker-family overlap**, to flag likely
+  duplicate genomes split across bins. The 40-family reference set is universal single-copy genes, so two
+  unrelated MAGs would both hit most of the same families regardless of species — family identity carries no
+  organism-identity signal once you're comparing *across* bins rather than completeness *within* one. Composition
+  (mean tetranucleotide vector + GC) is the same signal `outliers.js` already uses to separate organisms within a
+  bin; reused here in `src/model/mag-redundancy.js` for consistency. See `phase1-investigation.md`'s Phase 8
+  section for the full reasoning and the in-browser verification (a synthetic near-identical-composition MAG
+  pair correctly flagged, a compositionally distinct third MAG correctly not flagged).
+- **Phase 9's per-MAG FASTA export skips contigs whose FASTA lines weren't uniformly wrapped**
+  (`faiEntry.uniform === false`) rather than guessing a byte span for them — `src/model/fasta-extract.js`'s
+  `computeSequenceByteSpan` returns `null` in that case and the caller surfaces a "N contig(s) skipped" note. A
+  gzip-compressed source needs one full decompression pass before slicing (offsets are in the *decompressed*
+  stream — `faiEntry.sourceCompressed`), done once per export via `DecompressionStream`, not per contig.
+- **Export always reflects the live working assignment**, not the originally loaded tables — `initExportSection`
+  in `app.js` reads straight from the same `workingAssignment` Map the Phase 7 interactive section mutates, via
+  `assignmentToRows`. This matches the brief's "revised... table, reflecting any manual reassignment" wording
+  literally: there's deliberately no separate "export the original" option.
 
-## What's next: Phase 8 (comparison views and QC across the full set)
-
-Per the brief:
-- Good-bin vs. bad-bin side-by-side view (tight, well-separated cluster vs. scattered/fragmented one) — likely
-  reuses the Phase 7 scatter (`src/viz/scatter.js`, `scatter-geometry.js`) rendered twice with two different
-  bins' contigs, since the plotting/hit-testing machinery already exists.
-- Completeness vs. contamination scatter across *all* putative MAGs, coloured by which tool(s) support each one
-  — another natural fit for the existing scatter code, this time one point per MAG rather than per contig
-  (`bin-summary.js`'s `computeBinSummaries` / `bin-reconciliation.js`'s `putativeMags` already have everything
-  needed: completeness, redundancy, and which tools' bins contributed).
-- Redundancy check across finished MAGs to flag likely duplicate genomes split across separate bins — this is
-  new logic, not yet built anywhere: probably a pairwise composition/marker-family-overlap similarity between
-  MAGs, flagging pairs that look like the same organism binned twice.
-
-None of Phase 8's three bullets are implemented yet. Skim the relevant section of `clann-mag-explorer-brief.md`
-before starting, and check `phase1-investigation.md`'s existing findings sections for the established patterns
-(pure-logic-first-then-DOM-glue, scope decisions recorded explicitly, real bugs caught by working through the
-math or testing in-browser) before writing new code — the project has a consistent voice and testing discipline
-by now and it's worth matching rather than reinventing.
-
-## Then Phase 9 (export and site chrome)
-
-- Revised contig→bin assignment table export (from `working-assignment.js`'s current state — `assignmentToRows`
-  already produces the right shape, just needs a CSV/TSV serializer and a download trigger).
-- Per-MAG FASTA extraction via `Blob.slice` against the Phase 2 `.fai`-style index (`fasta-index.js` already
-  tracks byte offsets/line-layout per contig; the actual slice-and-reassemble-FASTA logic doesn't exist yet).
-  Note the known limitation already documented in `phase1-investigation.md`: a gzip-compressed source's offsets
-  are in the *decompressed* stream, so extraction from a `.gz` input needs a fresh decompression pass, not a
-  direct slice — `faiEntry.sourceCompressed` is already there to detect this case.
-- Summary table export per MAG (length, GC, N50, tool-agreement fraction, completeness tier) — mostly a CSV
-  serializer over data `bin-summary.js`/`bin-reconciliation.js` already compute.
-- About/FAQ content, responsive layout pass, and the `beforeunload`-adjacent "known limitation" framing the
-  brief asks for (reload loses the live `File` reference — already a documented, accepted limitation per Phase
-  1, not something to build around).
-
-## A few things worth doing regardless of which phase you start with
+## Open items still worth doing (not scoped phase work — pick up only if asked)
 
 - **The brief's open points section** (bottom of `clann-mag-explorer-brief.md`) lists several items marked as
   "a starting point... worth revisiting once tested against real student assemblies" — the paralog-safety
   thresholds, the pre-clustering aggressiveness, the chimerism-flagging rank cutoff. None of this has been
   tested against a *real* student assembly yet, only synthetic examples and the reference set's own held-out
-  data. If real assemblies become available, that calibration work is still open.
+  data.
 - **No coverage-table or Kraken2-input real-world file has been tested**, only hand-built examples
   (`examples/marker-gene-demo.coverage.tsv`, `examples/marker-gene-demo.kraken2.tsv`). The MetaBAT2
   `jgi_summarize_bam_contig_depths` format handling in `coverage-table.js` was written from documentation, not
-  verified against real tool output — worth a sanity check if a real file becomes available.
+  verified against real tool output.
+- **The Phase 9 FASTA export hasn't been tested against a gzip-compressed source** — the decompression-then-slice
+  path (`extractBinFasta`'s `needsDecompression` branch in `app.js`) is implemented per the documented offset
+  limitation but only exercised by the uncompressed path so far, since the shipped example FASTA isn't gzipped.
+- **No zip/multi-file bundling for FASTA export** — Phase 9 exports one bin's FASTA per click (a `<select>` +
+  button), not "export all bins at once." Deliberately kept simple (no new dependency, matches the "no runtime
+  dependencies" convention) rather than out of any brief requirement; revisit only if a real workflow needs it.
 - **`git log` is your friend here** — every phase's commit message is a mini design doc in itself (rationale,
   what was tested, what was deferred). Read the last 2–3 before starting new work in an area you haven't
   touched yet.

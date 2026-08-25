@@ -30,6 +30,16 @@ let workingAssignment = new Map();
 let hasUnsavedReassignments = false;
 let scatterPlotHandle = null;
 
+// Phase 9 export: the loaded assembly's own File (re-sliced via
+// Blob.slice for per-MAG FASTA extraction, never re-uploaded) and its
+// parsed records, kept at module scope alongside workingAssignment since
+// export reads from the same live session state. Reset on every fresh
+// load, same as workingAssignment above — a reload loses the File
+// reference regardless (brief's accepted, documented limitation; see
+// docs/phase1-investigation.md Phase 1), so there's nothing to persist.
+let currentAssemblyFile = null;
+let currentRecords = [];
+
 window.addEventListener('beforeunload', (e) => {
   if (!hasUnsavedReassignments) return;
   e.preventDefault();
@@ -437,7 +447,116 @@ function initQcSection(records, reconciliationResult) {
   `;
 }
 
+/** Triggers a browser save of `blob` as `filename` via a throwaway object URL. */
+function triggerDownload(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+/**
+ * Slices a MAG/bin's contigs' raw sequence bytes straight out of the
+ * original assembly File (brief §Export — "built via Blob.slice against
+ * the first-pass index rather than a second full file read") and
+ * reassembles them under their original headers into one multi-FASTA
+ * Blob. A gzip source needs one full decompression pass first (Phase 1's
+ * documented limitation: `.fai`-style offsets are in the *decompressed*
+ * stream) — done at most once per export, not per contig.
+ * @returns {Promise<{blob: Blob, skippedContigIds: string[]}>}
+ */
+async function extractBinFasta(binId, contigIds) {
+  const { planFastaExtraction } = window.ClannMAG.fastaExtract;
+  const plan = planFastaExtraction(currentRecords, new Map([[binId, contigIds]]));
+  const { entries, skippedContigIds } = plan.get(binId);
+
+  const needsDecompression = entries.some((e) => {
+    const record = currentRecords.find((r) => r.id === e.id);
+    return record && record.faiEntry.sourceCompressed;
+  });
+  let decompressedBytes = null;
+  if (needsDecompression) {
+    const stream = currentAssemblyFile.stream().pipeThrough(new DecompressionStream('gzip'));
+    decompressedBytes = new Uint8Array(await new Response(stream).arrayBuffer());
+  }
+
+  const parts = [];
+  for (const entry of entries) {
+    parts.push(`>${entry.header}\n`);
+    const { offset, byteLength } = entry.span;
+    const seqBytes = decompressedBytes
+      ? decompressedBytes.slice(offset, offset + byteLength)
+      : new Uint8Array(await currentAssemblyFile.slice(offset, offset + byteLength).arrayBuffer());
+    parts.push(seqBytes);
+    if (seqBytes.length === 0 || seqBytes[seqBytes.length - 1] !== 10) parts.push('\n');
+  }
+  return { blob: new Blob(parts, { type: 'text/plain' }), skippedContigIds };
+}
+
+/**
+ * Phase 9: export section — revised contig->bin assignment table (CSV),
+ * per-MAG/bin summary table (CSV), and per-bin FASTA extraction. Reads
+ * from the current working assignment, so an export always reflects any
+ * manual reassignment made in the session (brief's "revised" framing),
+ * not the originally loaded tables.
+ */
+function initExportSection() {
+  const { assignmentToRows, listBinIds } = window.ClannMAG.workingAssignment;
+  const { computeBinSummaries } = window.ClannMAG.binSummary;
+  const { assignmentToCsv, binSummaryToCsv } = window.ClannMAG.exportCsv;
+
+  const card = document.getElementById('export-card');
+  card.innerHTML = `
+    <h3>Export</h3>
+    <div class="row-count">Exports reflect the current working assignment, including any reassignments made above.</div>
+    <div class="row"><button class="act" id="exportAssignmentBtn" type="button">Download revised assignment table (CSV)</button></div>
+    <div class="row"><button class="act" id="exportSummaryBtn" type="button">Download bin summary table (CSV)</button></div>
+    <div class="row">
+      <select id="exportBinSelect"></select>
+      <button class="act" id="exportFastaBtn" type="button">Download bin FASTA</button>
+    </div>
+    <div class="row-count" id="exportNote"></div>
+  `;
+
+  function refreshBinOptions() {
+    document.getElementById('exportBinSelect').innerHTML =
+      listBinIds(workingAssignment).map((b) => `<option value="${b}">${b}</option>`).join('');
+  }
+  refreshBinOptions();
+  document.getElementById('exportBinSelect').addEventListener('focus', refreshBinOptions);
+
+  document.getElementById('exportAssignmentBtn').addEventListener('click', () => {
+    const csv = assignmentToCsv(assignmentToRows(workingAssignment));
+    triggerDownload(new Blob([csv], { type: 'text/csv' }), 'contig-bin-assignment.csv');
+  });
+
+  document.getElementById('exportSummaryBtn').addEventListener('click', () => {
+    refreshBinOptions();
+    const { summaries } = computeBinSummaries(currentRecords, assignmentToRows(workingAssignment));
+    const csv = binSummaryToCsv(summaries);
+    triggerDownload(new Blob([csv], { type: 'text/csv' }), 'bin-summary.csv');
+  });
+
+  document.getElementById('exportFastaBtn').addEventListener('click', async () => {
+    const binId = document.getElementById('exportBinSelect').value;
+    if (!binId) return;
+    const note = document.getElementById('exportNote');
+    note.textContent = `Extracting ${binId}…`;
+    const contigIds = [...workingAssignment.entries()].filter(([, b]) => b === binId).map(([c]) => c);
+    const { blob, skippedContigIds } = await extractBinFasta(binId, contigIds);
+    triggerDownload(blob, `${binId}.fasta`);
+    note.textContent = skippedContigIds.length > 0
+      ? `${skippedContigIds.length.toLocaleString()} contig(s) skipped (non-uniform FASTA line wrapping can't be safely re-sliced).`
+      : '';
+  });
+}
+
 async function renderContigTable(records, binTablesByTool) {
+  currentRecords = records;
   const sorted = [...records].sort((a, b) => b.length - a.length);
   const totalLength = sorted.reduce((sum, r) => sum + r.length, 0);
   const n50 = computeN50(sorted.map((r) => r.length), totalLength);
@@ -495,6 +614,7 @@ async function renderContigTable(records, binTablesByTool) {
     ${outlierCard}
     ${tools.length > 0 ? '<div class="card" id="interactive-card"></div>' : ''}
     ${reconciliationResult ? '<div class="card" id="qc-card"></div>' : ''}
+    ${tools.length > 0 ? '<div class="card" id="export-card"></div>' : ''}
     ${perToolBinCards}
     <div class="card">
       <h3>Per-contig properties</h3>
@@ -512,6 +632,7 @@ async function renderContigTable(records, binTablesByTool) {
 
   if (tools.length > 0) initInteractiveSection(records, binTablesByTool, reconciliationResult);
   if (reconciliationResult) initQcSection(records, reconciliationResult);
+  if (tools.length > 0) initExportSection();
 }
 
 // Parsing runs in a Worker (src/workers/fasta-worker.js) rather than on the
@@ -541,6 +662,7 @@ function loadAssembly(file, binTablesByTool, coverageTable, krakenCalls) {
     const records = [];
     const t0 = performance.now();
     showError(`Parsing ${file.name}… 0 contigs so far`);
+    currentAssemblyFile = file;
 
     worker.onmessage = async (e) => {
       const msg = e.data;
