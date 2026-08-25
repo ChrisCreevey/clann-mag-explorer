@@ -1,6 +1,6 @@
 const { test, report, assert } = require('./harness');
 const {
-  parseIndexBinary, parseRefSeqsBinary,
+  parseIndexBinary, parseRefSeqsBinary, buildKeyLookup,
   extendUngapped, searchContigForMarkers,
 } = require('../src/model/marker-genes');
 const { forEachReducedKmer } = require('../src/model/reduced-alphabet');
@@ -45,22 +45,27 @@ function buildTestAssets(byFamily) {
       hitsByKey.get(code).push([seqId, pos]);
     });
   }
-  const numKeys = 10 ** K;
-  const keyOffsets = new Uint32Array(numKeys + 1);
+  // Sparse (populated-keys-only) shape — matches parseIndexBinary's output
+  // (see src/model/marker-genes.js), not a dense ALPHABET_SIZE^K array.
+  const sortedCodes = [...hitsByKey.keys()].sort((a, b) => a - b);
+  const sortedKeys = Uint32Array.from(sortedCodes);
+  const keyOffsets = new Uint32Array(sortedCodes.length + 1);
   let hitCursor = 0;
   const hitRefSeqId = [];
   const hitPosition = [];
-  for (let code = 0; code < numKeys; code++) {
-    keyOffsets[code] = hitCursor;
-    const hits = hitsByKey.get(code);
-    if (hits) {
-      for (const [seqId, pos] of hits) { hitRefSeqId.push(seqId); hitPosition.push(pos); hitCursor++; }
-    }
+  for (let i = 0; i < sortedCodes.length; i++) {
+    keyOffsets[i] = hitCursor;
+    for (const [seqId, pos] of hitsByKey.get(sortedCodes[i])) { hitRefSeqId.push(seqId); hitPosition.push(pos); hitCursor++; }
   }
-  keyOffsets[numKeys] = hitCursor;
+  keyOffsets[sortedCodes.length] = hitCursor;
+  const keyLookup = buildKeyLookup(sortedKeys);
 
   return {
-    index: { k: K, numKeys, numHits: hitCursor, keyOffsets, hitRefSeqId: Uint16Array.from(hitRefSeqId), hitPosition: Uint16Array.from(hitPosition) },
+    index: {
+      k: K, numPopulatedKeys: sortedCodes.length, numHits: hitCursor,
+      sortedKeys, keyLookup, keyOffsets,
+      hitRefSeqId: Uint16Array.from(hitRefSeqId), hitPosition: Uint16Array.from(hitPosition),
+    },
     refSeqs: { numSeqs: records.length, seqOffsets, taxId, familyIndex, residues },
     familyNames,
   };
@@ -77,20 +82,22 @@ function padFrames(realFrame, others = 5) {
 // ---- Binary round-trip ----
 
 test('parseIndexBinary/parseRefSeqsBinary round-trip a hand-built buffer', () => {
-  // A tiny, deliberately simple index: 1 key, 2 hits; 1 ref seq.
-  const numKeys = 5, numHits = 2, numSeqs = 1, residueBytes = 4;
+  // A tiny, deliberately simple sparse index: 1 populated key (code 2), 2 hits; 1 ref seq.
+  const numPopulatedKeys = 1, numHits = 2, numSeqs = 1, residueBytes = 4;
   const idxHeader = Buffer.alloc(16);
   idxHeader.write('SCGI', 0, 'ascii');
-  idxHeader.writeUInt8(1, 4); idxHeader.writeUInt8(K, 5); idxHeader.writeUInt8(10, 6); idxHeader.writeUInt8(2, 7);
-  idxHeader.writeUInt32LE(numKeys, 8); idxHeader.writeUInt32LE(numHits, 12);
-  const keyOffsets = Uint32Array.from([0, 0, 2, 2, 2, 2]);
+  idxHeader.writeUInt8(2, 4); idxHeader.writeUInt8(K, 5); idxHeader.writeUInt8(10, 6); idxHeader.writeUInt8(2, 7);
+  idxHeader.writeUInt32LE(numPopulatedKeys, 8); idxHeader.writeUInt32LE(numHits, 12);
+  const sortedKeys = Uint32Array.from([2]);
+  const keyOffsets = Uint32Array.from([0, 2]);
   const hitRefSeqId = Uint16Array.from([0, 0]);
   const hitPosition = Uint16Array.from([1, 3]);
-  const idxBuf = Buffer.concat([idxHeader, Buffer.from(keyOffsets.buffer), Buffer.from(hitRefSeqId.buffer), Buffer.from(hitPosition.buffer)]);
+  const idxBuf = Buffer.concat([idxHeader, Buffer.from(sortedKeys.buffer), Buffer.from(keyOffsets.buffer), Buffer.from(hitRefSeqId.buffer), Buffer.from(hitPosition.buffer)]);
 
   const parsed = parseIndexBinary(idxBuf.buffer.slice(idxBuf.byteOffset, idxBuf.byteOffset + idxBuf.length));
   assert.strictEqual(parsed.k, K);
   assert.strictEqual(parsed.numHits, numHits);
+  assert.deepStrictEqual([...parsed.sortedKeys], [...sortedKeys]);
   assert.deepStrictEqual([...parsed.keyOffsets], [...keyOffsets]);
   assert.deepStrictEqual([...parsed.hitRefSeqId], [0, 0]);
   assert.deepStrictEqual([...parsed.hitPosition], [1, 3]);

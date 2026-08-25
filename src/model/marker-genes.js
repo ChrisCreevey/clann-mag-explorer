@@ -54,20 +54,66 @@ const DEFAULT_PARAMS = {
 
 // ---- Binary asset parsing ----
 
+// A dense CSR array indexed directly by k-mer code (size ALPHABET_SIZE^k)
+// wastes space proportional to how sparse the reference set's real content
+// is — at k=7 only 14.8% of the 10,000,000 possible keys were ever
+// populated, so 85% of that array was stored purely to say "no hits here".
+// Storing only the populated keys (sorted, CSR-style offsets alongside)
+// instead decouples index size from k entirely, at the cost of needing a
+// lookup instead of direct array indexing at runtime — buildKeyLookup below
+// does that once at parse time (an open-addressed hash table over the
+// populated codes), so per-kmer lookup at search time stays O(1) average,
+// same as the old direct-index scheme.
+function hashCode32(code) {
+  return (Math.imul(code ^ (code >>> 16), 0x2545f491) >>> 0);
+}
+
+function buildKeyLookup(sortedKeys) {
+  const n = sortedKeys.length;
+  let capacity = 64;
+  while (capacity < n * 2) capacity *= 2; // ~50% load factor
+  const mask = capacity - 1;
+  const slotIndex = new Int32Array(capacity).fill(-1); // -1 = empty; else index into sortedKeys/keyOffsets
+  for (let i = 0; i < n; i++) {
+    const code = sortedKeys[i];
+    let h = hashCode32(code) & mask;
+    while (slotIndex[h] !== -1) h = (h + 1) & mask;
+    slotIndex[h] = i;
+  }
+  return { slotIndex, mask };
+}
+
+/** Returns the populated-key index for `code` (for use with keyOffsets), or -1 if code has no hits at all. */
+function lookupPopulatedIndex(sortedKeys, keyLookup, code) {
+  const { slotIndex, mask } = keyLookup;
+  let h = hashCode32(code) & mask;
+  for (;;) {
+    const idx = slotIndex[h];
+    if (idx === -1) return -1;
+    if (sortedKeys[idx] === code) return idx;
+    h = (h + 1) & mask;
+  }
+}
+
 function parseIndexBinary(buf) {
   const view = new DataView(buf);
   const magic = String.fromCharCode(view.getUint8(0), view.getUint8(1), view.getUint8(2), view.getUint8(3));
   if (magic !== 'SCGI') throw new Error(`parseIndexBinary: bad magic "${magic}", expected "SCGI"`);
+  const version = view.getUint8(4);
+  if (version !== 2) throw new Error(`parseIndexBinary: unsupported version ${version} (expected 2, the sparse-key format — rebuild via build/02-index.js)`);
   const k = view.getUint8(5);
-  const numKeys = view.getUint32(8, true);
+  const numPopulatedKeys = view.getUint32(8, true);
   const numHits = view.getUint32(12, true);
 
   let offset = 16;
-  const keyOffsets = new Uint32Array(buf, offset, numKeys + 1); offset += (numKeys + 1) * 4;
+  const sortedKeys = new Uint32Array(buf, offset, numPopulatedKeys); offset += numPopulatedKeys * 4;
+  const keyOffsets = new Uint32Array(buf, offset, numPopulatedKeys + 1); offset += (numPopulatedKeys + 1) * 4;
   const hitRefSeqId = new Uint16Array(buf, offset, numHits); offset += numHits * 2;
   const hitPosition = new Uint16Array(buf, offset, numHits); offset += numHits * 2;
 
-  return { k, numKeys, numHits, keyOffsets, hitRefSeqId, hitPosition };
+  const keyLookup = buildKeyLookup(sortedKeys);
+
+  return { k, numPopulatedKeys, numHits, sortedKeys, keyOffsets, keyLookup, hitRefSeqId, hitPosition };
 }
 
 function parseRefSeqsBinary(buf) {
@@ -223,13 +269,15 @@ function findOrCreateDiagSlot(diagKey) {
  * all six frames so far).
  */
 function searchFrameAgainstIndex(frameStr, frameIdx, assets, xDrop, bestByRefSeqId, maxSeedsPerSegment, minSeedStride) {
-  const { k, keyOffsets, hitRefSeqId, hitPosition } = assets.index;
+  const { k, sortedKeys, keyLookup, keyOffsets, hitRefSeqId, hitPosition } = assets.index;
   const { seqOffsets, residues } = assets.refSeqs;
   diagTableEpochCounter = (diagTableEpochCounter + 1) >>> 0;
   if (diagTableEpochCounter === 0) diagTableEpochCounter = 1; // skip the sentinel value on the very unlikely 32-bit wraparound
 
   forEachReducedKmer(frameStr, k, (code, framePos) => {
-    const start = keyOffsets[code], end = keyOffsets[code + 1];
+    const populatedIdx = lookupPopulatedIndex(sortedKeys, keyLookup, code);
+    if (populatedIdx < 0) return; // code has no hits anywhere in the reference set
+    const start = keyOffsets[populatedIdx], end = keyOffsets[populatedIdx + 1];
     for (let h = start; h < end; h++) {
       const refSeqId = hitRefSeqId[h];
       const refPos = hitPosition[h];
@@ -350,6 +398,7 @@ function searchContigForMarkers(sixFrameTranslations, assets, params = {}) {
 const exportsObj = {
   DEFAULT_PARAMS,
   parseIndexBinary, parseRefSeqsBinary, parseAssets, loadMarkerGeneAssets,
+  buildKeyLookup, lookupPopulatedIndex,
   extendUngapped, searchFrameAgainstIndex, computeFamilyCandidates, resolveParams, searchContigForMarkers,
 };
 if (typeof module !== 'undefined' && module.exports) module.exports = exportsObj;

@@ -5,24 +5,36 @@
 // docs/phase1-investigation.md §4-5). Builds the seed index from the
 // clustered reference set: reduced-alphabet translation (Murphy10, see
 // src/model/reduced-alphabet.js — shared with the runtime search so
-// windowing is identical on both sides), k=6 windowing, packed into a
-// CSR-style binary lookup (data/scg40-index.bin), plus the real
-// (non-reduced) reference sequences needed for extension scoring
+// windowing is identical on both sides), k=8 windowing, packed into a
+// sparse (populated-keys-only) binary lookup (data/scg40-index.bin), plus
+// the real (non-reduced) reference sequences needed for extension scoring
 // (data/scg40-refseqs.bin) and a small family-name sidecar.
 //
-// k=7, up from the original 6 (itself up from the brief's suggested 5):
-// measured directly (see "Phase 3 findings" in docs/phase1-investigation.md),
-// k=5 left 81.5% of the 100,000 possible reduced-alphabet keys populated,
-// k=6 cut that to ~45% of 1,000,000 possible keys — real protein sequences
-// aren't close to uniform over a 10-letter alphabet, so a random,
-// marker-free contig still seeded on a large fraction of its windows even
-// at k=6. k=7 (10,000,000 possible keys) is a further specificity gain: a
-// real query k-mer lands on a populated (and, once the reference set fills
-// it, capped) key far less often, which is the actual driver of
-// single-threaded runtime on real assemblies (per-hit diagonal bookkeeping
-// dominates — see marker-genes.js's diagonal table) — not just a size/speed
-// knob but a real reduction in how often the seeding step has anything to
-// look up at all.
+// k history — each step measured directly (see "Phase 3 findings" in
+// docs/phase1-investigation.md): k=5 left 81.5% of 100,000 possible
+// reduced-alphabet keys populated; k=6, ~45% of 1,000,000; k=7, ~14.8% of
+// 10,000,000. Real protein sequences aren't close to uniform over a
+// 10-letter alphabet, so lower k means a random, marker-free contig still
+// seeds on a large fraction of its windows. k=8 (100,000,000 possible
+// keys) continues that trend — ~3% occupancy — for a further real
+// specificity gain, not just a size/speed knob: a real query k-mer lands
+// on a populated (and, once filled, capped) key far less often, which is
+// what actually drives single-threaded runtime (per-hit diagonal
+// bookkeeping dominates — see marker-genes.js's diagonal table).
+//
+// A dense CSR array indexed directly by k-mer code (size ALPHABET_SIZE^K)
+// would be unusable at this k — 100,000,000 slots at 4 bytes each is
+// 400MB just for the offsets array, before any hit data, regardless of
+// how sparse the real content is (and every one of a worker pool's
+// threads would hold its own parsed copy). Instead this only stores the
+// keys that are actually populated (sorted, with parallel CSR offsets),
+// so file size tracks real content rather than 10^K — see
+// src/model/marker-genes.js's parseIndexBinary/buildKeyLookup for the
+// runtime side (an open-addressed hash table over the populated codes,
+// built once at parse time, giving the same O(1)-average lookup a dense
+// array would). This also means the *build* itself no longer needs any
+// O(ALPHABET_SIZE^K)-sized array (the Map-based counting below), so this
+// same code scales to any k without a build-time memory blowup either.
 //
 // Input:  build/intermediate/scg40_clustered.fasta (from 01-cluster.js)
 // Output: data/scg40-index.bin
@@ -33,7 +45,7 @@ const fs = require('fs');
 const path = require('path');
 const { ALPHABET_SIZE, forEachReducedKmer } = require('../src/model/reduced-alphabet');
 
-const K = 7; // reduced-alphabet k-mer length for seeding — see note above on why 7 over the previous 6
+const K = 8; // reduced-alphabet k-mer length for seeding — see note above on why 8 over the previous 7
 const INPUT = path.join(__dirname, 'intermediate', 'scg40_clustered.fasta');
 const DATA_DIR = path.join(__dirname, '..', 'data');
 
@@ -117,25 +129,36 @@ function buildRefSeqsBinary(records, familyIndexByName) {
 const MAX_HITS_PER_KEY = 20;
 
 function buildIndexBinary(records) {
-  const numKeys = ALPHABET_SIZE ** K;
-  const keyCounts = new Uint32Array(numKeys);
-
-  // Pass 1: count hits per key so we can compute CSR offsets up front.
+  // Pass 1: gather every hit per key, keyed by a plain Map rather than a
+  // dense ALPHABET_SIZE^K-sized array — memory tracks actual populated-key
+  // count (millions, not hundreds of millions), so this scales to any k.
+  // Collecting every hit (not just the first MAX_HITS_PER_KEY seen) is
+  // needed to sample evenly rather than biasing toward whichever sequences
+  // happen to come first in the file.
+  const hitsByKey = new Map();
   for (let seqId = 0; seqId < records.length; seqId++) {
-    forEachReducedKmer(records[seqId].seq, K, (code) => { keyCounts[code]++; });
+    forEachReducedKmer(records[seqId].seq, K, (code, position) => {
+      let hits = hitsByKey.get(code);
+      if (!hits) { hits = []; hitsByKey.set(code, hits); }
+      hits.push(seqId, position);
+    });
   }
 
-  const cappedCounts = new Uint32Array(numKeys);
-  for (let k = 0; k < numKeys; k++) cappedCounts[k] = Math.min(keyCounts[k], MAX_HITS_PER_KEY);
+  const sortedCodes = [...hitsByKey.keys()].sort((a, b) => a - b);
+  const numPopulatedKeys = sortedCodes.length;
+  const sortedKeys = Uint32Array.from(sortedCodes);
 
-  const keyOffsets = new Uint32Array(numKeys + 1);
-  for (let k = 0; k < numKeys; k++) keyOffsets[k + 1] = keyOffsets[k] + cappedCounts[k];
-  const numHits = keyOffsets[numKeys];
+  const cappedCounts = new Uint32Array(numPopulatedKeys);
+  for (let i = 0; i < numPopulatedKeys; i++) cappedCounts[i] = Math.min(hitsByKey.get(sortedCodes[i]).length / 2, MAX_HITS_PER_KEY);
+
+  const keyOffsets = new Uint32Array(numPopulatedKeys + 1);
+  for (let i = 0; i < numPopulatedKeys; i++) keyOffsets[i + 1] = keyOffsets[i] + cappedCounts[i];
+  const numHits = keyOffsets[numPopulatedKeys];
 
   // Uint16 for both: numSeqs and every sequence length are well under
   // 65,536 for this reference set (checked below). Halves the dominant
-  // cost in the shipped index (numHits is tens of millions of entries
-  // even after capping) versus Uint32.
+  // cost in the shipped index (numHits is millions of entries even after
+  // capping) versus Uint32.
   if (records.length >= 65536) throw new Error(`buildIndexBinary: ${records.length} ref seqs exceeds Uint16 range — widen hitRefSeqId back to Uint32`);
   const maxLen = Math.max(...records.map((r) => r.seq.length));
   if (maxLen >= 65536) throw new Error(`buildIndexBinary: a ${maxLen}-residue sequence exceeds Uint16 range — widen hitPosition back to Uint32`);
@@ -143,30 +166,18 @@ function buildIndexBinary(records) {
   const hitRefSeqId = new Uint16Array(numHits);
   const hitPosition = new Uint16Array(numHits);
 
-  // Pass 2: gather every hit per key first (needed to sample evenly rather
-  // than just keeping the first MAX_HITS_PER_KEY encountered, which would
-  // bias toward whichever sequences happen to come first in the file).
-  const hitsByKey = new Array(numKeys);
-  for (let seqId = 0; seqId < records.length; seqId++) {
-    forEachReducedKmer(records[seqId].seq, K, (code, position) => {
-      if (!hitsByKey[code]) hitsByKey[code] = [];
-      hitsByKey[code].push(seqId, position);
-    });
-  }
-
-  // Pass 3: place a capped, evenly-strided sample of each key's hits —
+  // Pass 2: place a capped, evenly-strided sample of each key's hits —
   // deterministic (not random) so the shipped index is reproducible
   // across build runs, and spread across the full segment rather than
   // clustered at the start.
   let cursor = 0;
-  for (let k = 0; k < numKeys; k++) {
-    const hits = hitsByKey[k];
-    if (!hits) continue;
+  for (let i = 0; i < numPopulatedKeys; i++) {
+    const hits = hitsByKey.get(sortedCodes[i]);
     const totalForKey = hits.length / 2;
-    const keep = cappedCounts[k];
+    const keep = cappedCounts[i];
     const stride = totalForKey / keep;
-    for (let i = 0; i < keep; i++) {
-      const srcIdx = Math.floor(i * stride);
+    for (let j = 0; j < keep; j++) {
+      const srcIdx = Math.floor(j * stride);
       hitRefSeqId[cursor] = hits[srcIdx * 2];
       hitPosition[cursor] = hits[srcIdx * 2 + 1];
       cursor++;
@@ -175,21 +186,23 @@ function buildIndexBinary(records) {
 
   const headerBuf = Buffer.alloc(16);
   headerBuf.write('SCGI', 0, 'ascii');
-  headerBuf.writeUInt8(1, 4); // version
+  headerBuf.writeUInt8(2, 4); // version 2: sparse (populated-keys-only) format
   headerBuf.writeUInt8(K, 5);
   headerBuf.writeUInt8(ALPHABET_SIZE, 6);
   headerBuf.writeUInt8(2, 7); // bytes per hitRefSeqId/hitPosition entry (Uint16)
-  headerBuf.writeUInt32LE(numKeys, 8);
+  headerBuf.writeUInt32LE(numPopulatedKeys, 8);
   headerBuf.writeUInt32LE(numHits, 12);
 
   return {
     buffer: Buffer.concat([
       headerBuf,
+      Buffer.from(sortedKeys.buffer),
       Buffer.from(keyOffsets.buffer),
       Buffer.from(hitRefSeqId.buffer),
       Buffer.from(hitPosition.buffer),
     ]),
     numHits,
+    numPopulatedKeys,
   };
 }
 
@@ -206,8 +219,8 @@ function main() {
 
   console.log('Building seed index...');
   const t0 = Date.now();
-  const { buffer: indexBuf, numHits } = buildIndexBinary(records);
-  console.log(`  ${numHits.toLocaleString()} hits, ${(indexBuf.length / 1e6).toFixed(1)}MB, ${((Date.now() - t0) / 1000).toFixed(1)}s`);
+  const { buffer: indexBuf, numHits, numPopulatedKeys } = buildIndexBinary(records);
+  console.log(`  ${numPopulatedKeys.toLocaleString()} populated keys (of ${(ALPHABET_SIZE ** K).toLocaleString()} possible), ${numHits.toLocaleString()} hits, ${(indexBuf.length / 1e6).toFixed(1)}MB, ${((Date.now() - t0) / 1000).toFixed(1)}s`);
   fs.writeFileSync(path.join(DATA_DIR, 'scg40-index.bin'), indexBuf);
 
   console.log('Building reference sequence store...');
