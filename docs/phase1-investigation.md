@@ -342,3 +342,51 @@ see, the same category of gap Phase 3's `parseHeader` bug was, just at load time
 Verified in-browser: `examples/marker-gene-demo.bins.tsv` (added alongside the existing marker-gene demo FASTA)
 loaded together correctly join, render the bin summary card, and show the right completeness numbers for the
 two contigs' already-verified-real COG0012/COG0016 marker calls.
+
+## Phase 5 findings — cross-tool bin matching and reconciliation
+
+**The core feature** (brief §Background): works at contig granularity, not DAS_Tool's whole-bin granularity —
+for each contig, how many of the loaded tools agree on where it belongs, computed by matching each tool's bins
+to one another via contig overlap.
+
+- [src/model/bin-reconciliation.js](../src/model/bin-reconciliation.js): bins from different tools are matched
+  via **reciprocal-best-hit Jaccard overlap** — bin A (tool 1) and bin B (tool 2) are linked only if each is the
+  other's single best match by contig-set Jaccard similarity AND that score clears `minJaccard` (default 0.1).
+  Same conservative principle the marker-gene module's paralog-safety margin check uses, applied here so two
+  only-loosely-overlapping bins don't get merged on weak evidence. Matched bins (across any number of tools, not
+  just pairs) are grouped into putative MAGs via union-find over all pairwise reciprocal-match edges — makes
+  matching transitive across 3+ tools without needing an explicit multi-way clustering step.
+- **Per-contig agreement** comes from a simple vote: each tool that assigned a contig to *some* bin (not
+  "unbinned" — see below) votes for whichever putative MAG that bin ended up in. `agreementFraction` =
+  majority-vote-count / total-voting-tools. A contig is core to its majority MAG only at `agreementFraction ===
+  1` (unanimous among tools that had an opinion); anything else goes to that MAG's `disputedContigIds` and,
+  ranked by how split the vote is, `disputedContigsRanked`.
+- **"Unbinned" handling, a real correctness issue caught before it became a bug, not after**: two different
+  tools' "everything left over" buckets usually share most of their contigs by construction, which would make
+  naive bin-matching merge them into one large bogus putative MAG. `UNBINNED_LABELS` (`unbinned`, `none`, `na`,
+  etc., case-insensitive) excludes those rows from bin-matching entirely — the contig gets no vote from that
+  tool, rather than a vote for a fake "everyone's leftovers" MAG. Deliberately conservative: only exact known
+  labels, not e.g. any purely-numeric bin ID, so a tool's real bin "0" isn't swept in by mistake — documented as
+  a known limitation, not exhaustive across every tool's own unbinned convention.
+- **UI** (`app.js`): the file picker now content-sniffs *every* non-assembly file for a contig->bin table (not
+  just the first, per Phase 4) and labels each by its filename (content alone can't name which tool produced a
+  table). Two or more tables get a "Cross-tool reconciliation" card — a side-by-side putative-MAG table (each
+  tool's contributing bin ID + contig count in its own column, core/disputed counts, and completeness/redundancy
+  computed from the high-confidence core contig set only) plus a ranked disputed-contig table (each tool's vote
+  shown per contig) — alongside the existing per-tool Phase 4 bin-summary cards, not instead of them.
+
+**A real bug in my own test, not the implementation**, caught by actually running the numbers rather than
+trusting the intent behind a hand-built scenario: a first attempt at a "3 tools, 2 agree vs 1 disagrees" test
+put the disagreeing tool's alternative bin as a single-contig bin with nothing else to compare against — since
+a bin with only one competitor is *trivially* its own reciprocal best match regardless of how weak the overlap
+actually is, it got merged into the majority group by transitivity, silently defeating the disagreement the
+test meant to construct. Fixed by padding the disagreeing bin with contigs no other tool mentions, driving its
+Jaccard overlap with the majority group's bin decisively under `minJaccard` so it stays a separate MAG — a good
+reminder that "give the minority voter its own bin" isn't sufficient to test disagreement; the bin's *overlap*
+with the majority is what the algorithm actually keys on.
+
+**Tests**: 9 new (`bin-reconciliation.test.js`) — 77 total, all passing. Verified in-browser with a second
+example bin table (`examples/marker-gene-demo.bins2.tsv`, deliberately disagreeing with the existing one on
+`contig_2`) loaded alongside the assembly and the first table: 2 putative MAGs matched correctly, `contig_2`
+correctly flagged as the sole disputed contig at 50% agreement, both per-tool bin-summary cards and the
+reconciliation card rendered with no console errors.

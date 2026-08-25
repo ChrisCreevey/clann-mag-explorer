@@ -7,8 +7,8 @@ results from a single assembly. Fifth tool in the [Clann suite](https://chriscre
 [Clann Pangenome Explorer](https://chriscreevey.github.io/clann-pangenome-explorer/), and
 [Clann eDNA Explorer](https://chriscreevey.github.io/clann-edna-explorer/).
 
-**Status: Phase 4 complete (streaming FASTA parsing + per-contig stats + marker-gene identification + single
-contig->bin table loading and bin summaries), under active development.** See
+**Status: Phase 5 complete (streaming FASTA parsing + per-contig stats + marker-gene identification + bin
+loading/summaries + cross-tool reconciliation), under active development.** See
 [`clann-mag-explorer-brief.md`](clann-mag-explorer-brief.md) for the full design brief and
 [`docs/phase1-investigation.md`](docs/phase1-investigation.md) for the current investigation/planning notes.
 

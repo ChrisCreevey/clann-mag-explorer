@@ -2,10 +2,14 @@
   'use strict';
 
 // App shell. Loads an assembly FASTA (streamed through fasta-index.js in a
-// Worker, with marker-gene search) and, per Phase 4, an optional single
-// contig->bin table alongside it — content-sniffed from whatever else was
-// selected, not by filename. Cross-tool reconciliation (multiple bin
-// tables at once), filters, and reassignment land in later phases.
+// Worker, with marker-gene search) and, per Phase 4/5, any number of
+// contig->bin tables alongside it — content-sniffed from whatever else was
+// selected, not by filename (the tool label per table IS taken from its
+// filename, since content alone can't name which binning tool produced
+// it). One table gets a single per-bin summary (Phase 4); two or more
+// also get cross-tool reconciliation (Phase 5): bins matched across tools
+// by contig overlap, core/disputed contig sets, and a side-by-side view.
+// Filters and interactive reassignment land in later phases.
 
 const THEME_KEY = 'clann-mag-explorer-theme';
 
@@ -62,7 +66,7 @@ function formatMimagTier(tier) {
   return `<span class="mimag-tier mimag-tier-${tier}">${label}</span>`;
 }
 
-function renderBinSummaryCard(records, binAssignments) {
+function renderBinSummaryCard(records, binAssignments, toolLabel) {
   const { computeBinSummaries } = window.ClannMAG.binSummary;
   const { summaries, unmatchedContigIds } = computeBinSummaries(records, binAssignments);
 
@@ -86,7 +90,7 @@ function renderBinSummaryCard(records, binAssignments) {
 
   return `
     <div class="card">
-      <h3>Bin summaries</h3>
+      <h3>Bin summaries${toolLabel ? ` — ${toolLabel}` : ''}</h3>
       <div class="row-count">${summaries.length.toLocaleString()} bins, largest first &middot; completeness/redundancy from the built-in marker-gene search (40 families) &middot; MIMAG-style tier is a completeness/contamination proxy only, not the full standard (no rRNA/tRNA check)</div>
       <div class="table-wrap scroll-panel">
         <table class="data-table">
@@ -104,7 +108,88 @@ function renderBinSummaryCard(records, binAssignments) {
   `;
 }
 
-function renderContigTable(records, binAssignments) {
+/**
+ * Phase 5: matches bins across two or more loaded tools by contig
+ * overlap and renders the reconciled view — putative MAGs (side by side
+ * across tools), and the ranked disputed-contig list.
+ */
+function renderReconciliationCard(records, binTablesByTool) {
+  const { reconcileBins } = window.ClannMAG.binReconciliation;
+  const { computeCompletenessRedundancy, mimagTier } = window.ClannMAG.binSummary;
+  const recordsById = new Map(records.map((r) => [r.id, r]));
+  const result = reconcileBins(binTablesByTool);
+  const tools = result.tools;
+
+  const magRows = result.putativeMags
+    .map((mag) => {
+      const coreRecords = mag.coreContigIds.map((id) => recordsById.get(id)).filter(Boolean);
+      const { completeness, redundancy } = computeCompletenessRedundancy(coreRecords);
+      const tier = mimagTier(completeness, redundancy);
+      const toolCells = tools
+        .map((tool) => {
+          const member = mag.members.find((m) => m.tool === tool);
+          return member
+            ? `<td>${member.binId} <span class="hint">(${member.contigCount.toLocaleString()})</span></td>`
+            : '<td class="hint">—</td>';
+        })
+        .join('');
+      return `<tr>
+        <td>${mag.magId}</td>
+        <td class="num">${mag.coreContigIds.length.toLocaleString()}</td>
+        <td class="num">${mag.disputedContigIds.length.toLocaleString()}</td>
+        <td class="num">${completeness.toFixed(1)}%</td>
+        <td class="num">${redundancy.toFixed(1)}%</td>
+        <td>${formatMimagTier(tier)}</td>
+        ${toolCells}
+      </tr>`;
+    })
+    .join('');
+
+  const DISPUTED_ROW_LIMIT = 200;
+  const disputedRows = result.disputedContigsRanked
+    .slice(0, DISPUTED_ROW_LIMIT)
+    .map((c) => {
+      const votesStr = tools.map((t) => `${t}: ${c.votes[t] ?? '<span class="hint">unbinned</span>'}`).join(' &middot; ');
+      return `<tr>
+        <td>${c.contigId}</td>
+        <td class="num">${(c.agreementFraction * 100).toFixed(0)}%</td>
+        <td class="num">${c.totalVotes}</td>
+        <td>${votesStr}</td>
+      </tr>`;
+    })
+    .join('');
+
+  return `
+    <div class="card">
+      <h3>Cross-tool reconciliation</h3>
+      <div class="row-count">${tools.length} tools loaded (${tools.join(', ')}) &middot; ${result.putativeMags.length.toLocaleString()} putative MAGs matched by contig overlap (reciprocal best hit, min Jaccard 0.1) &middot; completeness/redundancy below are computed from each MAG's high-confidence core (unanimous-agreement) contigs only</div>
+      <div class="table-wrap scroll-panel">
+        <table class="data-table">
+          <thead><tr>
+            <th>Putative MAG</th>
+            <th title="Contigs every voting tool agrees belong to this MAG">Core</th>
+            <th title="Contigs assigned here by some but not all voting tools">Disputed</th>
+            <th>Completeness</th>
+            <th>Redundancy</th>
+            <th>Tier</th>
+            ${tools.map((t) => `<th>${t}</th>`).join('')}
+          </tr></thead>
+          <tbody>${magRows}</tbody>
+        </table>
+      </div>
+      <h4>Disputed contigs, most split first</h4>
+      <div class="row-count">${result.disputedContigsRanked.length.toLocaleString()} contigs where loaded tools disagree${result.disputedContigsRanked.length > DISPUTED_ROW_LIMIT ? `, showing the first ${DISPUTED_ROW_LIMIT}` : ''}</div>
+      <div class="table-wrap scroll-panel">
+        <table class="data-table">
+          <thead><tr><th>Contig</th><th>Agreement</th><th>Tools voting</th><th>Votes by tool</th></tr></thead>
+          <tbody>${disputedRows}</tbody>
+        </table>
+      </div>
+    </div>
+  `;
+}
+
+function renderContigTable(records, binTablesByTool) {
   const sorted = [...records].sort((a, b) => b.length - a.length);
   const totalLength = sorted.reduce((sum, r) => sum + r.length, 0);
   const n50 = computeN50(sorted.map((r) => r.length), totalLength);
@@ -125,6 +210,12 @@ function renderContigTable(records, binAssignments) {
     </tr>`)
     .join('');
 
+  const tools = binTablesByTool ? [...binTablesByTool.keys()] : [];
+  const perToolBinCards = tools
+    .map((tool) => renderBinSummaryCard(records, binTablesByTool.get(tool), tools.length > 1 ? tool : null))
+    .join('');
+  const reconciliationCard = tools.length > 1 ? renderReconciliationCard(records, binTablesByTool) : '';
+
   explorer.innerHTML = `
     <div class="card">
       <h3>Assembly summary</h3>
@@ -135,7 +226,8 @@ function renderContigTable(records, binAssignments) {
       <div class="row"><label>Contigs with marker genes</label><strong>${contigsWithMarkers.toLocaleString()}</strong></div>
       <div class="row"><label>Distinct marker families hit</label><strong>${distinctFamiliesHit} / 40</strong></div>
     </div>
-    ${binAssignments ? renderBinSummaryCard(records, binAssignments) : ''}
+    ${reconciliationCard}
+    ${perToolBinCards}
     <div class="card">
       <h3>Per-contig properties</h3>
       <div class="row-count">${sorted.length.toLocaleString()} contigs, longest first</div>
@@ -155,7 +247,7 @@ function renderContigTable(records, binAssignments) {
 // main thread — see docs/phase1-investigation.md "Performance follow-ups":
 // same total work, but the page stays responsive and can show live
 // progress instead of freezing for however long a large assembly takes.
-function loadAssembly(file, binAssignments) {
+function loadAssembly(file, binTablesByTool) {
   return new Promise((resolve, reject) => {
     const worker = new Worker('src/workers/fasta-worker.js');
     const records = [];
@@ -171,7 +263,7 @@ function loadAssembly(file, binAssignments) {
       } else if (msg.type === 'done') {
         const elapsed = ((performance.now() - t0) / 1000).toFixed(1);
         showError(null);
-        renderContigTable(records, binAssignments);
+        renderContigTable(records, binTablesByTool);
         document.getElementById('hMeta').textContent =
           `${msg.summary.contigCount.toLocaleString()} contigs · ${msg.summary.totalLength.toLocaleString()} bp · parsed in ${elapsed}s`;
         document.getElementById('hTitle').textContent = file.name;
@@ -192,23 +284,35 @@ function loadAssembly(file, binAssignments) {
   });
 }
 
+/** Strips a filename down to its base name (no directories, no extension) for use as a tool label. */
+function fileBaseName(name) {
+  const withoutDir = name.split('/').pop();
+  const dot = withoutDir.lastIndexOf('.');
+  return dot > 0 ? withoutDir.slice(0, dot) : withoutDir;
+}
+
 /**
- * Among the files NOT identified as the assembly, find the first one that
- * content-sniffs as a contig->bin table and parse it. Multiple bin tables
- * (cross-tool reconciliation) is Phase 5 scope — for now, first match
- * wins and the rest are ignored silently, matching how the assembly pick
- * itself already works.
+ * Among the files NOT identified as the assembly, content-sniff every one
+ * that looks like a contig->bin table (any number — Phase 5's cross-tool
+ * reconciliation needs two or more, Phase 4's per-bin summary works with
+ * just one) and parse it. The tool label per table comes from its
+ * filename — content alone has no field naming which binning tool
+ * produced it — de-duplicated if two files share a base name.
+ * @returns {Promise<Map<string, {contigId:string,binId:string}[]>|null>}
  */
-async function findBinAssignments(otherFiles) {
+async function findAllBinTables(otherFiles) {
   const { sniff } = window.ClannMAG.sniff;
   const { parseContigBinTable } = window.ClannMAG.contigBinTable;
+  const binTablesByTool = new Map();
   for (const file of otherFiles) {
     const text = await file.text();
-    if (sniff(text).format === 'contig-bin-table') {
-      return parseContigBinTable(text);
-    }
+    if (sniff(text).format !== 'contig-bin-table') continue;
+    let label = fileBaseName(file.name);
+    let suffix = 2;
+    while (binTablesByTool.has(label)) label = `${fileBaseName(file.name)} (${suffix++})`;
+    binTablesByTool.set(label, parseContigBinTable(text));
   }
-  return null;
+  return binTablesByTool.size ? binTablesByTool : null;
 }
 
 function initFilePicker() {
@@ -228,10 +332,10 @@ function initFilePicker() {
       return;
     }
     const otherFiles = files.filter((f) => f !== assemblyFile);
-    const binAssignments = otherFiles.length ? await findBinAssignments(otherFiles) : null;
+    const binTablesByTool = otherFiles.length ? await findAllBinTables(otherFiles) : null;
 
     try {
-      await loadAssembly(assemblyFile, binAssignments);
+      await loadAssembly(assemblyFile, binTablesByTool);
     } catch {
       // already surfaced via showError inside loadAssembly
     }
