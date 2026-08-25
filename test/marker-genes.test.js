@@ -1,6 +1,6 @@
 const { test, report, assert } = require('./harness');
 const {
-  parseIndexBinary, parseRefSeqsBinary, buildKeyLookup,
+  parseIndexBinary, parseRefSeqsBinary, buildKeyLookup, buildBloomFilter,
   extendUngapped, searchContigForMarkers,
 } = require('../src/model/marker-genes');
 const { forEachReducedKmer } = require('../src/model/reduced-alphabet');
@@ -59,11 +59,12 @@ function buildTestAssets(byFamily) {
   }
   keyOffsets[sortedCodes.length] = hitCursor;
   const keyLookup = buildKeyLookup(sortedKeys);
+  const bloom = buildBloomFilter(sortedKeys);
 
   return {
     index: {
       k: K, numPopulatedKeys: sortedCodes.length, numHits: hitCursor,
-      sortedKeys, keyLookup, keyOffsets,
+      sortedKeys, keyLookup, bloom, keyOffsets,
       hitRefSeqId: Uint16Array.from(hitRefSeqId), hitPosition: Uint16Array.from(hitPosition),
     },
     refSeqs: { numSeqs: records.length, seqOffsets, taxId, familyIndex, residues },
