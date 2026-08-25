@@ -298,3 +298,47 @@ resolves each family's effective parameters as `DEFAULT_PARAMS < assets.threshol
 (most specific wins), so a caller can still override anything at call time for testing without touching the
 shipped asset. 8 new tests (3 for the override resolution/precedence behavior, 5 for `build/03-calibrate.js`'s
 `evenSample`/`percentile` helpers) — 48 tests total, all passing.
+
+## Phase 4 findings — single binning-result loading and bin summaries
+
+**Scope**: brief's Phase 4 is deliberately single-tool (one contig->bin table); cross-tool reconciliation
+(matching equivalent bins across multiple tools' tables) is Phase 5. Built:
+
+- [src/parsers/contig-bin-table.js](../src/parsers/contig-bin-table.js): parses the brief's "two-column tab/CSV"
+  input. Delimiter (tab vs comma) and header presence are both detected from content, not assumed — checked
+  against the two real conventions in circulation: DAS_Tool's `Fasta_to_Contig2Bin.sh` output (tab-delimited,
+  no header) and CONCOCT's `clustering_gt1000.csv` (comma-delimited, `contig_id,cluster_id` header row).
+- [src/parsers/sniff.js](../src/parsers/sniff.js): now a real content-based sniffer, distinguishing `breport`
+  (exactly 6 tab fields per line, reuses `parseBreportLine`) from `contig-bin-table` (uniform 2-column shape).
+  Doesn't route to `coverage-table` yet since that parser is still a stub — sniffing a format this repo can't
+  parse would be worse than not detecting it.
+- [src/model/bin-summary.js](../src/model/bin-summary.js): per-bin `computeBinSummaries` joining loaded contig
+  records to a bin table by ID — contig count, total length, N50/L50, mean GC, and SCG-based
+  completeness/redundancy computed directly from Phase 3's per-contig `markerHits` (completeness = fraction of
+  the 40 families found anywhere in the bin; redundancy = fraction of *found* families that appear on more than
+  one contig, the standard CheckM-style extra-copy proxy for contamination), plus a MIMAG-style tier
+  (`high`/`medium`/`low`) from completeness/contamination thresholds only — explicitly not the full MIMAG
+  standard, which also needs rRNA/tRNA presence this module has no signal for; said so in the UI, not just here,
+  per the marker-gene module's own precedent of surfacing limitations next to the number itself. Thresholds are
+  an overridable object (`DEFAULT_MIMAG_THRESHOLDS`), matching the "shown and adjustable" framing in the brief.
+  Contigs in the bin table with no matching loaded contig are reported (`unmatchedContigIds`), not silently
+  dropped or thrown on — a mismatched ID is a plausible real mistake (wrong assembly/table pairing) worth
+  surfacing.
+- `app.js`: the existing multi-file picker now also content-sniffs every non-assembly file for a contig->bin
+  table (first match wins — multiple tables is Phase 5) and renders a "Bin summaries" card between the assembly
+  summary and per-contig table when one loads alongside the FASTA.
+
+**One real bug caught by browser testing, not the unit tests**: `sniff.js` calls `parseBreportLine` from
+`breport.js` and `looksLikeContigBinTable` from `contig-bin-table.js` at module-eval time (top-level
+destructuring, not inside a function), so it needs both already loaded — `index.html` had it listed *first*
+among the parser `<script>` tags, which threw immediately in the browser (`Cannot read properties of undefined
+(reading 'breport')`) while every one of `sniff.js`'s own unit tests still passed, since Node's `require()`
+graph doesn't care about the same ordering a browser's sequential `<script>` tags do. Fixed by reordering the
+tags (`breport.js`/`contig-bin-table.js` before `sniff.js`); a reminder that this suite's "attach to `self`,
+load via plain `<script>` tags" convention makes tag order a real correctness dependency the unit tests can't
+see, the same category of gap Phase 3's `parseHeader` bug was, just at load time instead of parse time.
+
+**Tests**: 21 new (`contig-bin-table.test.js`, `sniff.test.js`, `bin-summary.test.js`) — 69 total, all passing.
+Verified in-browser: `examples/marker-gene-demo.bins.tsv` (added alongside the existing marker-gene demo FASTA)
+loaded together correctly join, render the bin summary card, and show the right completeness numbers for the
+two contigs' already-verified-real COG0012/COG0016 marker calls.

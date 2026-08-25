@@ -1,12 +1,11 @@
 (function () {
   'use strict';
 
-// App shell. Phase 2 wires up just enough to load a single assembly FASTA
-// end to end: pick a file, detect it looks like FASTA (gzip-aware peek,
-// content-based per the suite's convention — a real sniff.js covering
-// contig->bin/coverage tables too is still Phase 1/4 work), stream it
-// through fasta-index.js, and render the per-contig stats table. Bin
-// loading, filters, and reassignment land in later phases.
+// App shell. Loads an assembly FASTA (streamed through fasta-index.js in a
+// Worker, with marker-gene search) and, per Phase 4, an optional single
+// contig->bin table alongside it — content-sniffed from whatever else was
+// selected, not by filename. Cross-tool reconciliation (multiple bin
+// tables at once), filters, and reassignment land in later phases.
 
 const THEME_KEY = 'clann-mag-explorer-theme';
 
@@ -58,7 +57,54 @@ function formatMarkerHits(markerHits) {
     .join(', ');
 }
 
-function renderContigTable(records) {
+function formatMimagTier(tier) {
+  const label = { high: 'High', medium: 'Medium', low: 'Low' }[tier] || tier;
+  return `<span class="mimag-tier mimag-tier-${tier}">${label}</span>`;
+}
+
+function renderBinSummaryCard(records, binAssignments) {
+  const { computeBinSummaries } = window.ClannMAG.binSummary;
+  const { summaries, unmatchedContigIds } = computeBinSummaries(records, binAssignments);
+
+  const rows = summaries
+    .map((b) => `<tr>
+      <td>${b.binId}</td>
+      <td class="num">${b.contigCount.toLocaleString()}</td>
+      <td class="num">${b.totalLength.toLocaleString()}</td>
+      <td class="num">${b.n50.toLocaleString()}</td>
+      <td class="num">${b.l50.toLocaleString()}</td>
+      <td class="num">${(b.meanGc * 100).toFixed(1)}%</td>
+      <td class="num">${b.completeness.toFixed(1)}%</td>
+      <td class="num">${b.redundancy.toFixed(1)}%</td>
+      <td>${formatMimagTier(b.mimagTier)}</td>
+    </tr>`)
+    .join('');
+
+  const unmatchedNote = unmatchedContigIds.length
+    ? `<div class="hint">${unmatchedContigIds.length.toLocaleString()} contig ID(s) in the bin table were not found in the loaded assembly and were skipped (e.g. ${unmatchedContigIds.slice(0, 3).join(', ')}${unmatchedContigIds.length > 3 ? ', …' : ''}).</div>`
+    : '';
+
+  return `
+    <div class="card">
+      <h3>Bin summaries</h3>
+      <div class="row-count">${summaries.length.toLocaleString()} bins, largest first &middot; completeness/redundancy from the built-in marker-gene search (40 families) &middot; MIMAG-style tier is a completeness/contamination proxy only, not the full standard (no rRNA/tRNA check)</div>
+      <div class="table-wrap scroll-panel">
+        <table class="data-table">
+          <thead><tr>
+            <th>Bin</th><th>Contigs</th><th>Length</th><th>N50</th><th>L50</th><th>Mean GC</th>
+            <th title="Fraction of the 40 marker families found anywhere in this bin">Completeness</th>
+            <th title="Fraction of found families that appear on more than one contig — a proxy for contamination">Redundancy</th>
+            <th>Tier</th>
+          </tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+      ${unmatchedNote}
+    </div>
+  `;
+}
+
+function renderContigTable(records, binAssignments) {
   const sorted = [...records].sort((a, b) => b.length - a.length);
   const totalLength = sorted.reduce((sum, r) => sum + r.length, 0);
   const n50 = computeN50(sorted.map((r) => r.length), totalLength);
@@ -89,6 +135,7 @@ function renderContigTable(records) {
       <div class="row"><label>Contigs with marker genes</label><strong>${contigsWithMarkers.toLocaleString()}</strong></div>
       <div class="row"><label>Distinct marker families hit</label><strong>${distinctFamiliesHit} / 40</strong></div>
     </div>
+    ${binAssignments ? renderBinSummaryCard(records, binAssignments) : ''}
     <div class="card">
       <h3>Per-contig properties</h3>
       <div class="row-count">${sorted.length.toLocaleString()} contigs, longest first</div>
@@ -108,7 +155,7 @@ function renderContigTable(records) {
 // main thread — see docs/phase1-investigation.md "Performance follow-ups":
 // same total work, but the page stays responsive and can show live
 // progress instead of freezing for however long a large assembly takes.
-function loadAssembly(file) {
+function loadAssembly(file, binAssignments) {
   return new Promise((resolve, reject) => {
     const worker = new Worker('src/workers/fasta-worker.js');
     const records = [];
@@ -124,7 +171,7 @@ function loadAssembly(file) {
       } else if (msg.type === 'done') {
         const elapsed = ((performance.now() - t0) / 1000).toFixed(1);
         showError(null);
-        renderContigTable(records);
+        renderContigTable(records, binAssignments);
         document.getElementById('hMeta').textContent =
           `${msg.summary.contigCount.toLocaleString()} contigs · ${msg.summary.totalLength.toLocaleString()} bp · parsed in ${elapsed}s`;
         document.getElementById('hTitle').textContent = file.name;
@@ -145,6 +192,25 @@ function loadAssembly(file) {
   });
 }
 
+/**
+ * Among the files NOT identified as the assembly, find the first one that
+ * content-sniffs as a contig->bin table and parse it. Multiple bin tables
+ * (cross-tool reconciliation) is Phase 5 scope — for now, first match
+ * wins and the rest are ignored silently, matching how the assembly pick
+ * itself already works.
+ */
+async function findBinAssignments(otherFiles) {
+  const { sniff } = window.ClannMAG.sniff;
+  const { parseContigBinTable } = window.ClannMAG.contigBinTable;
+  for (const file of otherFiles) {
+    const text = await file.text();
+    if (sniff(text).format === 'contig-bin-table') {
+      return parseContigBinTable(text);
+    }
+  }
+  return null;
+}
+
 function initFilePicker() {
   const input = document.getElementById('folder-input');
   const openButtons = [document.getElementById('uploadBtn'), document.getElementById('emptyOpen')];
@@ -153,19 +219,19 @@ function initFilePicker() {
     const files = [...input.files];
     if (files.length === 0) return;
 
-    // Contig->bin / coverage / breport loading is Phase 4+; for now, load
-    // the first file that content-sniffs as a FASTA and ignore the rest,
-    // rather than silently doing nothing.
     let assemblyFile = null;
     for (const file of files) {
       if (await looksLikeFasta(file)) { assemblyFile = file; break; }
     }
     if (!assemblyFile) {
-      showError('No file among your selection looks like a FASTA assembly (checked for a leading ">" or gzip magic bytes). Bin/coverage table loading isn’t implemented yet.');
+      showError('No file among your selection looks like a FASTA assembly (checked for a leading ">" or gzip magic bytes).');
       return;
     }
+    const otherFiles = files.filter((f) => f !== assemblyFile);
+    const binAssignments = otherFiles.length ? await findBinAssignments(otherFiles) : null;
+
     try {
-      await loadAssembly(assemblyFile);
+      await loadAssembly(assemblyFile, binAssignments);
     } catch {
       // already surfaced via showError inside loadAssembly
     }
