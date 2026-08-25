@@ -45,7 +45,7 @@ const fs = require('fs');
 const path = require('path');
 const { ALPHABET_SIZE, forEachReducedKmer } = require('../src/model/reduced-alphabet');
 
-const K = 8; // reduced-alphabet k-mer length for seeding — see note above on why 8 over the previous 7
+const K = 9; // reduced-alphabet k-mer length for seeding — see note above; also a hard ceiling here, not just a tuning choice: ALPHABET_SIZE**K must stay under 2^32 (Uint32Array's range for sortedKeys), and 10**10 exceeds it — k=10 would silently alias distinct k-mers to the same stored key instead of erroring, so it's not safe to try without widening the storage format first
 const INPUT = path.join(__dirname, 'intermediate', 'scg40_clustered.fasta');
 const DATA_DIR = path.join(__dirname, '..', 'data');
 
@@ -145,6 +145,12 @@ const MAX_HITS_PER_KEY = 20;
 const MIN_HITS_PER_KEY = 2;
 
 function buildIndexBinary(records) {
+  // sortedKeys is a Uint32Array — a k-mer code >= 2^32 would silently wrap
+  // (alias to some other, unrelated code) instead of erroring, so this has
+  // to be checked explicitly rather than trusted to "just work" for a
+  // larger K later.
+  if (ALPHABET_SIZE ** K > 2 ** 32) throw new Error(`buildIndexBinary: ALPHABET_SIZE**K (${ALPHABET_SIZE ** K}) exceeds Uint32 range — sortedKeys would silently alias distinct k-mers`);
+
   // Pass 1: gather every hit per key, keyed by a plain Map rather than a
   // dense ALPHABET_SIZE^K-sized array — memory tracks actual populated-key
   // count (millions, not hundreds of millions), so this scales to any k.
