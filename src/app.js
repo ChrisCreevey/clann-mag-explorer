@@ -656,9 +656,50 @@ function attachAuxiliaryData(records, coverageTable, krakenCalls) {
   }
 }
 
+// Marker-gene search is the slow part of loading an assembly (a hand-rolled
+// seed-and-extend search per contig — see src/model/marker-genes.js), so it
+// runs in its own pool of workers, one per available core, dispatched
+// round-robin as fasta-worker.js streams contigs in. fasta-worker.js itself
+// stays single-threaded (the streaming parse doesn't shard cleanly) but
+// marker search is embarrassingly parallel across contigs.
+const MARKER_POOL_SIZE = Math.max(1, Math.min(navigator.hardwareConcurrency || 4, 8));
+
 function loadAssembly(file, binTablesByTool, coverageTable, krakenCalls) {
   return new Promise((resolve, reject) => {
     const worker = new Worker('src/workers/fasta-worker.js');
+    const markerWorkers = Array.from({ length: MARKER_POOL_SIZE }, () => new Worker('src/workers/marker-search-worker.js'));
+    const pendingById = new Map(); // requestId -> resolve
+    const pendingPromises = [];
+    let nextWorker = 0;
+    let nextRequestId = 0;
+
+    markerWorkers.forEach((w) => {
+      w.onmessage = (e) => {
+        const { id, markerHits } = e.data;
+        const resolveOne = pendingById.get(id);
+        if (resolveOne) { pendingById.delete(id); resolveOne(markerHits); }
+      };
+    });
+
+    function dispatchMarkerSearch(record) {
+      if (!record.frames) return;
+      const id = nextRequestId++;
+      const w = markerWorkers[nextWorker];
+      nextWorker = (nextWorker + 1) % markerWorkers.length;
+      const frames = record.frames;
+      delete record.frames; // handed off; the worker gets its own copy via postMessage
+      const done = new Promise((res) => pendingById.set(id, res)).then((markerHits) => {
+        record.markerHits = markerHits;
+      });
+      pendingPromises.push(done);
+      w.postMessage({ id, frames });
+    }
+
+    function terminateAll() {
+      worker.terminate();
+      markerWorkers.forEach((w) => w.terminate());
+    }
+
     const records = [];
     const t0 = performance.now();
     showError(`Parsing ${file.name}… 0 contigs so far`);
@@ -668,9 +709,11 @@ function loadAssembly(file, binTablesByTool, coverageTable, krakenCalls) {
       const msg = e.data;
       if (msg.type === 'contig') {
         records.push(msg.record);
+        dispatchMarkerSearch(msg.record);
       } else if (msg.type === 'progress') {
         showError(`Parsing ${file.name}… ${msg.contigsSoFar.toLocaleString()} contigs so far`);
       } else if (msg.type === 'done') {
+        await Promise.all(pendingPromises);
         const elapsed = ((performance.now() - t0) / 1000).toFixed(1);
         showError(null);
         attachAuxiliaryData(records, coverageTable, krakenCalls);
@@ -678,17 +721,17 @@ function loadAssembly(file, binTablesByTool, coverageTable, krakenCalls) {
         document.getElementById('hMeta').textContent =
           `${msg.summary.contigCount.toLocaleString()} contigs · ${msg.summary.totalLength.toLocaleString()} bp · parsed in ${elapsed}s`;
         document.getElementById('hTitle').textContent = file.name;
-        worker.terminate();
+        terminateAll();
         resolve();
       } else if (msg.type === 'error') {
         showError(`Failed to parse ${file.name}: ${msg.message}`);
-        worker.terminate();
+        terminateAll();
         reject(new Error(msg.message));
       }
     };
     worker.onerror = (err) => {
       showError(`Failed to parse ${file.name}: ${err.message}`);
-      worker.terminate();
+      terminateAll();
       reject(err);
     };
     worker.postMessage({ file });
