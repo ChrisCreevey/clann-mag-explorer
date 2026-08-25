@@ -10,13 +10,19 @@
 // (non-reduced) reference sequences needed for extension scoring
 // (data/scg40-refseqs.bin) and a small family-name sidecar.
 //
-// k=6, not the brief's lower suggested bound of 5: measured directly (see
-// "Phase 3 findings" in docs/phase1-investigation.md), k=5 left 81.5% of
-// the 100,000 possible reduced-alphabet keys populated in this reference
-// set — real protein sequences aren't close to uniform over a 10-letter
-// alphabet, so a random, marker-free contig still seeded on the large
-// majority of its windows. k=6 (1,000,000 possible keys) cuts populated-key
-// occupancy to ~45%, a real specificity gain, not just a size/speed knob.
+// k=7, up from the original 6 (itself up from the brief's suggested 5):
+// measured directly (see "Phase 3 findings" in docs/phase1-investigation.md),
+// k=5 left 81.5% of the 100,000 possible reduced-alphabet keys populated,
+// k=6 cut that to ~45% of 1,000,000 possible keys — real protein sequences
+// aren't close to uniform over a 10-letter alphabet, so a random,
+// marker-free contig still seeded on a large fraction of its windows even
+// at k=6. k=7 (10,000,000 possible keys) is a further specificity gain: a
+// real query k-mer lands on a populated (and, once the reference set fills
+// it, capped) key far less often, which is the actual driver of
+// single-threaded runtime on real assemblies (per-hit diagonal bookkeeping
+// dominates — see marker-genes.js's diagonal table) — not just a size/speed
+// knob but a real reduction in how often the seeding step has anything to
+// look up at all.
 //
 // Input:  build/intermediate/scg40_clustered.fasta (from 01-cluster.js)
 // Output: data/scg40-index.bin
@@ -27,7 +33,7 @@ const fs = require('fs');
 const path = require('path');
 const { ALPHABET_SIZE, forEachReducedKmer } = require('../src/model/reduced-alphabet');
 
-const K = 6; // reduced-alphabet k-mer length for seeding — see note above on why 6 over the brief's suggested 5
+const K = 7; // reduced-alphabet k-mer length for seeding — see note above on why 7 over the previous 6
 const INPUT = path.join(__dirname, 'intermediate', 'scg40_clustered.fasta');
 const DATA_DIR = path.join(__dirname, '..', 'data');
 

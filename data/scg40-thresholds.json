@@ -4,10 +4,15 @@
     "minScore": 50,
     "minCoverage": 0.5,
     "minMargin": 10,
-    "minRepresentatives": 2
+    "minRepresentatives": 2,
+    "minSeedStride": 4,
+    "maxSeedsPerSegment": 150
   },
   "familyOverrides": {
     "COG0495": {
+      "minRepresentatives": 1
+    },
+    "COG0525": {
       "minRepresentatives": 1
     }
   }
