@@ -71,19 +71,31 @@ function parseRefSeqsBinary(buf) {
   return { numSeqs, seqOffsets, taxId, familyIndex, residues };
 }
 
-/** @param {{indexBuf: ArrayBuffer, refSeqsBuf: ArrayBuffer, familyNames: string[]}} raw */
-function parseAssets({ indexBuf, refSeqsBuf, familyNames }) {
-  return { index: parseIndexBinary(indexBuf), refSeqs: parseRefSeqsBinary(refSeqsBuf), familyNames };
+/**
+ * @param {{indexBuf: ArrayBuffer, refSeqsBuf: ArrayBuffer, familyNames: string[],
+ *   thresholds?: {defaultParams?: object, familyOverrides?: Record<string,object>}}} raw
+ */
+function parseAssets({ indexBuf, refSeqsBuf, familyNames, thresholds }) {
+  return { index: parseIndexBinary(indexBuf), refSeqs: parseRefSeqsBinary(refSeqsBuf), familyNames, thresholds };
 }
 
-/** Fetch and parse the three shipped assets. @param {string} dataUrl base path, e.g. 'data/' */
+/**
+ * Fetch and parse the shipped assets, including the optional per-family
+ * calibration table (build/03-calibrate.js's output). Calibration is
+ * genuinely optional — the whole marker-gene module already degrades
+ * gracefully when assets fail to load (brief's "optional module"
+ * framing) — so a missing/failed thresholds fetch just falls back to
+ * DEFAULT_PARAMS for every family rather than failing the whole load.
+ * @param {string} dataUrl base path, e.g. 'data/'
+ */
 async function loadMarkerGeneAssets(dataUrl) {
   const [indexBuf, refSeqsBuf, familyNames] = await Promise.all([
     fetch(dataUrl + 'scg40-index.bin').then((r) => r.arrayBuffer()),
     fetch(dataUrl + 'scg40-refseqs.bin').then((r) => r.arrayBuffer()),
     fetch(dataUrl + 'scg40-families.json').then((r) => r.json()),
   ]);
-  return parseAssets({ indexBuf, refSeqsBuf, familyNames });
+  const thresholds = await fetch(dataUrl + 'scg40-thresholds.json').then((r) => r.json()).catch(() => undefined);
+  return parseAssets({ indexBuf, refSeqsBuf, familyNames, thresholds });
 }
 
 // ---- Seed-and-extend search ----
@@ -194,43 +206,74 @@ function searchFrameAgainstIndex(frameStr, frameIdx, assets, xDrop, bestByRefSeq
  * @param {object} [params] - overrides for DEFAULT_PARAMS
  * @returns {Array<{family: string, representativeCount: number, bestScore: number, provenanceTaxId: number}>}
  */
-function searchContigForMarkers(sixFrameTranslations, assets, params = {}) {
-  const p = { ...DEFAULT_PARAMS, ...params };
+/**
+ * Merges DEFAULT_PARAMS, any shipped per-family calibration
+ * (assets.thresholds, from build/03-calibrate.js — see
+ * docs/phase1-investigation.md "Phase 3 calibration findings"),
+ * caller-supplied overrides, then that same family's own override on top
+ * — the most specific source wins. Every family without its own override
+ * just gets the merged global defaults.
+ */
+function resolveParams(family, p) {
+  const override = p.familyOverrides && p.familyOverrides[family];
+  return override ? { ...p, ...override } : p;
+}
+
+/**
+ * Seeds and extends against every candidate reference sequence, then
+ * applies only the per-hit score/coverage threshold (not the margin or
+ * multi-representative-agreement checks) — the shared first half of
+ * searchContigForMarkers, also used directly by build/03-calibrate.js to
+ * inspect the full pre-filter picture (how many representatives a held-out
+ * sequence *could* have supported, not just whether it happened to clear
+ * whatever the current margin/agreement thresholds are).
+ *
+ * @returns {{byFamily: Map<string, object[]>, familyBestScore: Map<string, number>}}
+ */
+function computeFamilyCandidates(sixFrameTranslations, assets, p) {
   const bestByRefSeqId = new Map();
   sixFrameTranslations.forEach((frameStr, frameIdx) => {
     searchFrameAgainstIndex(frameStr, frameIdx, assets, p.xDrop, bestByRefSeqId);
   });
 
   const { seqOffsets, familyIndex, taxId } = assets.refSeqs;
-  const passing = [];
+  const byFamily = new Map();
   for (const [refSeqId, result] of bestByRefSeqId) {
+    const family = assets.familyNames[familyIndex[refSeqId]];
+    const fp = resolveParams(family, p);
     const refLength = seqOffsets[refSeqId + 1] - seqOffsets[refSeqId];
     const coverage = result.alignedLength / refLength;
-    if (result.score < p.minScore || coverage < p.minCoverage) continue;
-    passing.push({
-      refSeqId, score: result.score, coverage,
-      family: assets.familyNames[familyIndex[refSeqId]],
-      taxId: taxId[refSeqId],
-    });
+    if (result.score < fp.minScore || coverage < fp.minCoverage) continue;
+
+    if (!byFamily.has(family)) byFamily.set(family, []);
+    byFamily.get(family).push({ refSeqId, score: result.score, coverage, family, taxId: taxId[refSeqId] });
   }
 
-  const byFamily = new Map();
-  for (const hit of passing) {
-    if (!byFamily.has(hit.family)) byFamily.set(hit.family, []);
-    byFamily.get(hit.family).push(hit);
-  }
   const familyBestScore = new Map();
   for (const [family, hits] of byFamily) familyBestScore.set(family, Math.max(...hits.map((h) => h.score)));
 
+  return { byFamily, familyBestScore };
+}
+
+function searchContigForMarkers(sixFrameTranslations, assets, params = {}) {
+  const p = {
+    ...DEFAULT_PARAMS,
+    ...(assets.thresholds && assets.thresholds.defaultParams),
+    familyOverrides: (assets.thresholds && assets.thresholds.familyOverrides) || {},
+    ...params,
+  };
+  const { byFamily, familyBestScore } = computeFamilyCandidates(sixFrameTranslations, assets, p);
+
   const calledFamilies = [];
   for (const [family, hits] of byFamily) {
+    const fp = resolveParams(family, p);
     const bestScore = familyBestScore.get(family);
     let secondBest = 0;
     for (const [otherFamily, score] of familyBestScore) {
       if (otherFamily !== family && score > secondBest) secondBest = score;
     }
-    if (bestScore - secondBest < p.minMargin) continue; // fails reciprocal-best-hit-style margin check
-    if (hits.length < p.minRepresentatives) continue; // fails multi-representative agreement
+    if (bestScore - secondBest < fp.minMargin) continue; // fails reciprocal-best-hit-style margin check
+    if (hits.length < fp.minRepresentatives) continue; // fails multi-representative agreement
 
     const best = hits.reduce((a, b) => (b.score > a.score ? b : a));
     calledFamilies.push({
@@ -246,7 +289,7 @@ function searchContigForMarkers(sixFrameTranslations, assets, params = {}) {
 const exportsObj = {
   DEFAULT_PARAMS,
   parseIndexBinary, parseRefSeqsBinary, parseAssets, loadMarkerGeneAssets,
-  extendUngapped, searchFrameAgainstIndex, searchContigForMarkers,
+  extendUngapped, searchFrameAgainstIndex, computeFamilyCandidates, resolveParams, searchContigForMarkers,
 };
 if (typeof module !== 'undefined' && module.exports) module.exports = exportsObj;
 if (typeof self !== 'undefined') {

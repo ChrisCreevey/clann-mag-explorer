@@ -18,6 +18,11 @@
 // Input:  reference-data/scg40_raw.fasta
 // Output: build/intermediate/scg40_clustered.fasta (one representative
 //         sequence per cluster, header unchanged)
+//         build/intermediate/scg40_heldout.fasta (every sequence that
+//         clustered INTO an existing representative rather than becoming
+//         one itself — i.e. never shipped in the index — used by
+//         build/03-calibrate.js as free, known-family held-out test data:
+//         a real member of the family the search never got to see)
 //         build/intermediate/scg40_cluster_report.txt (per-family
 //         original count -> cluster count, for eyeballing how much
 //         diversity survives)
@@ -28,6 +33,7 @@ const path = require('path');
 const INPUT = path.join(__dirname, '..', 'reference-data', 'scg40_raw.fasta');
 const OUT_DIR = path.join(__dirname, 'intermediate');
 const OUT_FASTA = path.join(OUT_DIR, 'scg40_clustered.fasta');
+const OUT_HELDOUT_FASTA = path.join(OUT_DIR, 'scg40_heldout.fasta');
 const OUT_REPORT = path.join(OUT_DIR, 'scg40_cluster_report.txt');
 
 const K = 5; // amino acid k-mer length for the MinHash signature
@@ -102,6 +108,7 @@ function clusterFamily(records) {
   // are more likely to nest inside a longer relative's cluster.
   const ordered = [...records].sort((a, b) => b.seq.length - a.seq.length);
   const representatives = []; // [{ record, signature }]
+  const heldOut = [];
 
   for (const record of ordered) {
     const sig = minHashSignature(kmerSet(record.seq));
@@ -112,9 +119,10 @@ function clusterFamily(records) {
         break;
       }
     }
-    if (!placed) representatives.push({ record, signature: sig });
+    if (placed) heldOut.push(record);
+    else representatives.push({ record, signature: sig });
   }
-  return representatives.map((r) => r.record);
+  return { representatives: representatives.map((r) => r.record), heldOut };
 }
 
 function main() {
@@ -134,27 +142,32 @@ function main() {
   fs.mkdirSync(OUT_DIR, { recursive: true });
   const reportLines = ['family\toriginal_count\tcluster_count\tretained_fraction'];
   const outParts = [];
-  let totalOriginal = 0, totalClusters = 0;
+  const heldOutParts = [];
+  let totalOriginal = 0, totalClusters = 0, totalHeldOut = 0;
   const t0 = Date.now();
 
   for (const [family, famRecords] of [...byFamily.entries()].sort()) {
-    const reps = clusterFamily(famRecords);
+    const { representatives: reps, heldOut } = clusterFamily(famRecords);
     totalOriginal += famRecords.length;
     totalClusters += reps.length;
+    totalHeldOut += heldOut.length;
     reportLines.push(
       `${family}\t${famRecords.length}\t${reps.length}\t${(reps.length / famRecords.length).toFixed(3)}`
     );
     for (const r of reps) outParts.push(`>${r.header}\n${r.seq}\n`);
+    for (const r of heldOut) heldOutParts.push(`>${r.header}\n${r.seq}\n`);
     console.log(`  ${family}: ${famRecords.length} -> ${reps.length} (${((reps.length / famRecords.length) * 100).toFixed(1)}%)`);
   }
 
   fs.writeFileSync(OUT_FASTA, outParts.join(''));
+  fs.writeFileSync(OUT_HELDOUT_FASTA, heldOutParts.join(''));
   reportLines.push(`TOTAL\t${totalOriginal}\t${totalClusters}\t${(totalClusters / totalOriginal).toFixed(3)}`);
   fs.writeFileSync(OUT_REPORT, reportLines.join('\n') + '\n');
 
   console.log(`Done in ${((Date.now() - t0) / 1000).toFixed(1)}s.`);
-  console.log(`${totalOriginal} -> ${totalClusters} representatives (${((totalClusters / totalOriginal) * 100).toFixed(1)}%).`);
+  console.log(`${totalOriginal} -> ${totalClusters} representatives (${((totalClusters / totalOriginal) * 100).toFixed(1)}%), ${totalHeldOut} held out.`);
   console.log(`Wrote ${OUT_FASTA}`);
+  console.log(`Wrote ${OUT_HELDOUT_FASTA}`);
   console.log(`Wrote ${OUT_REPORT}`);
 }
 

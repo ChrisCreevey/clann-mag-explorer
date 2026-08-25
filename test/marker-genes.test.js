@@ -180,4 +180,34 @@ test('lowering minRepresentatives to 1 allows a single-representative call throu
   assert.strictEqual(calls[0].family, 'cog0012');
 });
 
+// ---- Per-family threshold overrides (build/03-calibrate.js's output) ----
+
+test('a shipped per-family override (assets.thresholds) is applied without passing explicit params', () => {
+  const assets = buildTestAssets({ cog0012: [fixtures.cog0012[0]] }); // only 1 representative, same as above
+  assets.thresholds = { defaultParams: {}, familyOverrides: { cog0012: { minRepresentatives: 1 } } };
+  const frames = padFrames(fixtures.cog0012[0].seq);
+  const calls = searchContigForMarkers(frames, assets); // no explicit params — override must come from assets
+  assert.strictEqual(calls.length, 1, 'the shipped override should have let this single-representative call through');
+  assert.strictEqual(calls[0].family, 'cog0012');
+});
+
+test('a per-family override only affects that family, not others evaluated in the same call', () => {
+  const assets = buildTestAssets({ cog0012: [fixtures.cog0012[0]], cog0016: [fixtures.cog0016[0]] });
+  assets.thresholds = { defaultParams: {}, familyOverrides: { cog0012: { minRepresentatives: 1 } } };
+  // cog0016 has no override, so with only 1 representative each, only cog0012 should be called.
+  const framesA = padFrames(fixtures.cog0012[0].seq);
+  const callsA = searchContigForMarkers(framesA, assets);
+  assert.deepStrictEqual(callsA.map((c) => c.family), ['cog0012']);
+});
+
+test('an explicit params argument still wins over a shipped override', () => {
+  const assets = buildTestAssets({ cog0012: [fixtures.cog0012[0]] });
+  assets.thresholds = { defaultParams: {}, familyOverrides: { cog0012: { minRepresentatives: 1 } } };
+  const frames = padFrames(fixtures.cog0012[0].seq);
+  // Caller explicitly re-tightens minRepresentatives via familyOverrides in
+  // the params argument itself, which searchContigForMarkers spreads last.
+  const calls = searchContigForMarkers(frames, assets, { familyOverrides: { cog0012: { minRepresentatives: 2 } } });
+  assert.strictEqual(calls.length, 0, 'explicit params should override the shipped threshold asset');
+});
+
 report();

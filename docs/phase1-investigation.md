@@ -249,3 +249,52 @@ families, negative control, both directions of the multi-representative-agreemen
 [test/build-index.test.js](../test/build-index.test.js) (the taxID-parsing regression). 40 tests total, all
 passing. Verified in-browser against a synthetic assembly with two contigs each containing a real, different
 embedded marker gene plus one marker-free contig — all three called correctly, no console errors.
+
+## Phase 3 calibration findings — per-family thresholds, not one global guess
+
+Prompted by a direct question worth recording: a hand-picked two-family spot check (COG0012 vs COG0016, used
+throughout the performance-tuning work above) showed wildly different natural headroom — COG0012 tolerated
+`MIN_SEEDS_PER_DIAGONAL` up to 6 with 95 representatives to spare, COG0016 lost its call entirely past 3. That
+was real evidence the *single global* `DEFAULT_PARAMS` (guessed placeholders per the note above) could be
+simultaneously too strict for a thin family and needlessly loose for a robust one — but two hand-picked families
+is not "checked against all 40," and the fix belongs in calibration data, not another guess.
+
+**The held-out set already existed for free.** `build/01-cluster.js` discards ~42% of the raw reference set as
+near-duplicates of a chosen representative — real, known-family sequences that never went into the shipped
+index. Extended it to also write `build/intermediate/scg40_heldout.fasta` (29,354 sequences) instead of
+discarding them silently: a natural true-positive test set with no external genome download needed.
+
+**[build/03-calibrate.js](../build/03-calibrate.js)**: for each of the 40 families, samples 150 held-out
+sequences (evenly strided, deterministic), runs each through the *same* search code path production uses
+(`computeFamilyCandidates` — a refactor of `searchContigForMarkers` that exposes the pre-filter candidate data:
+representative count and margin-over-next-best-family *before* the margin/agreement gates are applied, so
+calibration can see what a query could have supported, not just whether it happened to clear today's
+threshold). Derives, per family, the 10th-percentile representative-count and margin observed across its own
+true positives — i.e. the largest threshold ~90% of that family's real members would still clear — discounted
+by 20% for safety margin beyond the sample. Deliberately **only overrides a family when the default would cost
+it measured sensitivity**, never tightens beyond default even where a family has spare headroom: the held-out
+set is drawn from the same collection the index itself came from, so it's a trustworthy *relative* signal
+between families but not a substitute for the brief's own ask of testing against genomes not enriched for these
+families — tightening further based on this data alone would be fitting to the reference set's internal
+diversity, not real-world divergence.
+
+**Real result, run against the full shipped index**: only **1 of 40 families** (COG0495) needed an override
+(`minRepresentatives` 2→1; its held-out true positives' 10th-percentile representative count was 2, discounted
+to 1). Every other family's margin comfortably cleared the default `minMargin=10` by two to three orders of
+magnitude (observed 10th-percentile margins ranged ~390–4,300 across families) — meaning the earlier
+COG0016-at-threshold-4 finding was specific to the diagonal-seed-count knob and the one hand-picked fixture
+sequence used to test it, not a sign the family is generally fragile; tested against 150 real held-out COG0016
+members, it turned out to be unremarkable. This is the concrete payoff of measuring against all 40 rather than
+extrapolating from two: the actual problem was much smaller and more localized than the spot check suggested.
+Also surfaced, not acted on (out of scope — would mean calibrating `minScore`/`minCoverage` per family, which
+carries the same reference-internal-diversity overfitting risk flagged above): two families (COG0124: 1/150,
+COG0525: 3/150) had a handful of held-out sequences fail even the base score/coverage threshold outright — a
+low, plausibly-acceptable-under-the-brief's-"under-calling is fine" rate, but a real one worth knowing about.
+
+**Runtime wiring**: `loadMarkerGeneAssets` now also fetches `data/scg40-thresholds.json` (the calibration
+script's output — `{defaultParams, familyOverrides}`), falling back to `DEFAULT_PARAMS` for every family if the
+fetch fails, consistent with the module's existing "optional, degrade gracefully" framing. `searchContigForMarkers`
+resolves each family's effective parameters as `DEFAULT_PARAMS < assets.thresholds < explicit params argument`
+(most specific wins), so a caller can still override anything at call time for testing without touching the
+shipped asset. 8 new tests (3 for the override resolution/precedence behavior, 5 for `build/03-calibrate.js`'s
+`evenSample`/`percentile` helpers) — 48 tests total, all passing.

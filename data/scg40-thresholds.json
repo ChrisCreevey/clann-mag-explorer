@@ -1,0 +1,14 @@
+{
+  "defaultParams": {
+    "xDrop": 15,
+    "minScore": 50,
+    "minCoverage": 0.5,
+    "minMargin": 10,
+    "minRepresentatives": 2
+  },
+  "familyOverrides": {
+    "COG0495": {
+      "minRepresentatives": 1
+    }
+  }
+}
