@@ -21,7 +21,7 @@ clean, and the app has been verified end-to-end in a real browser at every phase
 | 5 | Cross-tool bin matching/reconciliation, core/disputed sets | Done |
 | 6 | Outlier flagging (composition/coverage/marker/taxonomy/Kraken2) | Done |
 | 7 | Interactive reassignment (scatter + drag-select + live stats) | Done |
-| 8 | Comparison views and QC across the full set | **Not started** |
+| 8 | Comparison views and QC across the full set | Done |
 | 9 | Export and site chrome (About/FAQ, responsive pass) | **Not started** |
 
 Run `node test/run.js` to confirm nothing regressed before you start. Every commit on `main` so far is one phase

@@ -172,6 +172,9 @@ main > *, #wrap, #explorer, .card{min-width:0}
 
 .row-count{color:var(--muted);font-size:11.5px;margin:0 0 6px 0}
 .empty-state{color:var(--muted);font-size:12.5px}
+
+.qc-comparison-row{display:flex;gap:16px;flex-wrap:wrap;margin-bottom:12px}
+.qc-comparison-row > div{flex:1 1 320px;min-width:280px}
 .empty-note{color:var(--muted);font-style:italic;padding:12px}
 
 @media (max-width: 760px){

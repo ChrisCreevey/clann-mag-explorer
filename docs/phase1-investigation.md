@@ -517,4 +517,43 @@ button, and confirmed the working-bins table recalculated immediately with the c
 total lengths — matching hand-computed expectations from the underlying contig lengths. Axis-switching
 (re-`setDataPoints` with a different scalar) re-rendered all 3 points correctly. No console errors throughout.
 
+## Phase 8 findings — comparison views and QC across the full set
+
+**Scope decision on the redundancy check's similarity signal**: composition (mean tetranucleotide vector) and
+mean GC, not marker-family overlap, decide whether two putative MAGs look like the same organism split across
+bins. Marker-family overlap is the right signal for whole-*bin* completeness/redundancy (`bin-summary.js`) but is
+useless here: the 40-family reference set is universal single-copy genes, so two MAGs from unrelated species will
+both hit most of the same families at similar completeness — family identity carries no organism-identity signal
+once you're comparing across bins rather than within one. Composition is the same signal `outliers.js` already
+uses to separate one organism's contigs from another's inside a bin; reusing it here (in a new
+`src/model/mag-redundancy.js`, since the shape of the computation — pairwise across MAGs, not per-contig within
+one bin — doesn't fit `outliers.js`'s existing function signatures) keeps one consistent "what tells organisms
+apart" answer across the app rather than inventing a second one.
+
+**Completeness/contamination-across-all-MAGs scatter needed no new statistics** — it's `bin-summary.js`'s
+existing `computeBinSummaries` called against a pseudo-assignment built from each putative MAG's
+`coreContigIds`/`disputedContigIds` (Phase 5's `reconcileBins` output) relabelled by `magId` instead of a tool's
+own bin id. `src/model/qc-comparison.js` only picks and reshapes for display (`buildMagQcPoints` for the scatter
+points, `pickComparisonBins` for the good/bad choice) — no new completeness/redundancy math, mirroring the
+Phase 7 lesson that `computeBinSummaries` is already generic enough to call again on any assignment shape.
+
+**Good-vs-bad bin choice**: `completeness - redundancy` score across bins with 2+ contigs (a single-contig bin
+has no cluster shape to visually contrast). Ties/insufficient data (fewer than 2 eligible bins — common with the
+small example dataset, which has only 1 core contig per MAG) surface as an explicit "need at least two..." message
+rather than a broken or empty plot; verified this exact fallback text renders correctly in-browser against the
+shipped example data before testing the populated path.
+
+**Verified in the browser** with two paths, since the shipped example dataset (`examples/marker-gene-demo.*`) is
+too small to exercise the good/bad comparison or trigger a redundancy flag (each MAG has only 1 core contig):
+(1) loaded the real example FASTA + both bin tables + coverage table via a synthetic `DataTransfer` file-input
+event (no real file dialog available to automation) — confirmed the QC card renders, the completeness/redundancy
+scatter plots both real MAGs at the correct SVG coordinates, and the good/bad section correctly falls back to its
+"need at least two putative MAGs with 2+ contigs" message rather than erroring. (2) Called
+`computeBinSummaries`/`pickComparisonBins`/`computeMagRedundancy` directly in the loaded page's console against a
+synthetic 3-MAG scenario (two MAGs with near-identical composition, one clearly different) — confirmed
+`pickComparisonBins` picked the right good/bad MAGs by score, and `computeMagRedundancy` flagged exactly the
+near-identical pair (`compositionSimilarity: 1, likelyDuplicate: true`) while correctly not flagging either
+against the distinct third MAG (`compositionSimilarity: 0.69, likelyDuplicate: false`). No console errors in
+either path. All 134 tests pass (8 new, across `test/mag-redundancy.test.js` and `test/qc-comparison.test.js`).
+
 **Tests**: 17 new (`working-assignment.test.js`, `scatter-geometry.test.js`) — 126 total, all passing.

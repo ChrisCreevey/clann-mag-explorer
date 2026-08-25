@@ -354,6 +354,89 @@ function initInteractiveSection(records, binTablesByTool, reconciliationResult) 
   renderWorkingBins();
 }
 
+/**
+ * Phase 8: comparison views and QC across the full reconciled set (brief
+ * §Comparison and QC) — good-vs-bad side-by-side contig scatter,
+ * completeness/contamination scatter across every putative MAG coloured
+ * by supporting tools, and the pairwise redundancy check flagging likely
+ * duplicate genomes. Only meaningful once cross-tool reconciliation has
+ * run (needs `putativeMags`), so callers only invoke this when more than
+ * one bin table was loaded.
+ */
+function initQcSection(records, reconciliationResult) {
+  const { computeBinSummaries } = window.ClannMAG.binSummary;
+  const { pickComparisonBins, buildMagQcPoints } = window.ClannMAG.qcComparison;
+  const { computeMagRedundancy } = window.ClannMAG.magRedundancy;
+  const { createScatterPlot } = window.ClannMAG.scatter;
+
+  const { putativeMags } = reconciliationResult;
+  const magAssignmentRows = putativeMags.flatMap((mag) =>
+    [...mag.coreContigIds, ...mag.disputedContigIds].map((contigId) => ({ contigId, binId: mag.magId }))
+  );
+  const { summaries: magSummaries } = computeBinSummaries(records, magAssignmentRows);
+
+  const card = document.getElementById('qc-card');
+  card.innerHTML = `
+    <h3>Comparison and QC across putative MAGs</h3>
+    <h4>Good bin vs. bad bin</h4>
+    <div class="row-count" id="qcComparisonNote"></div>
+    <div class="qc-comparison-row">
+      <div><div class="row-count" id="qcGoodLabel"></div><div id="qcGoodScatter"></div></div>
+      <div><div class="row-count" id="qcBadLabel"></div><div id="qcBadScatter"></div></div>
+    </div>
+    <h4>Completeness vs. contamination, all putative MAGs</h4>
+    <div class="row-count">${magSummaries.length.toLocaleString()} putative MAG(s), coloured by which tool(s) support each one. X axis: completeness %. Y axis: redundancy % (contamination proxy).</div>
+    <div id="magQcScatter"></div>
+    <h4>Possible duplicate genomes</h4>
+    <div class="row-count" id="redundancyNote"></div>
+    <div class="table-wrap scroll-panel" id="redundancyWrap"></div>
+  `;
+
+  const { good, bad } = pickComparisonBins(magSummaries);
+  document.getElementById('qcComparisonNote').textContent = good && bad
+    ? 'The MAG with the best completeness-minus-redundancy score, plotted against the worst, for a direct visual contrast.'
+    : 'Need at least two putative MAGs with 2+ contigs each to show a comparison.';
+
+  function contigScatterPoints(magId) {
+    const contigIds = new Set(magAssignmentRows.filter((r) => r.binId === magId).map((r) => r.contigId));
+    return records
+      .filter((r) => contigIds.has(r.id))
+      .map((r) => ({ id: r.id, x: r.gcContent * 100, y: Math.log10(Math.max(1, r.length)), colorKey: magId }));
+  }
+
+  if (good && bad) {
+    document.getElementById('qcGoodLabel').textContent =
+      `${good.binId} — completeness ${good.completeness.toFixed(1)}%, redundancy ${good.redundancy.toFixed(1)}%`;
+    document.getElementById('qcBadLabel').textContent =
+      `${bad.binId} — completeness ${bad.completeness.toFixed(1)}%, redundancy ${bad.redundancy.toFixed(1)}%`;
+    createScatterPlot(document.getElementById('qcGoodScatter'), contigScatterPoints(good.binId),
+      { width: 320, height: 260, onSelectionChange: () => {} });
+    createScatterPlot(document.getElementById('qcBadScatter'), contigScatterPoints(bad.binId),
+      { width: 320, height: 260, onSelectionChange: () => {} });
+  }
+
+  createScatterPlot(document.getElementById('magQcScatter'), buildMagQcPoints(magSummaries, putativeMags),
+    { width: 640, height: 360, onSelectionChange: () => {} });
+
+  const redundancyPairs = computeMagRedundancy(records, putativeMags);
+  const flaggedPairs = redundancyPairs.filter((p) => p.likelyDuplicate);
+  document.getElementById('redundancyNote').textContent = flaggedPairs.length > 0
+    ? `${flaggedPairs.length.toLocaleString()} pair(s) of putative MAGs have near-identical composition — worth checking whether they're the same organism split across bins.`
+    : 'No putative MAG pairs look like the same organism split across separate bins (by composition similarity).';
+  document.getElementById('redundancyWrap').innerHTML = redundancyPairs.length === 0 ? '' : `
+    <table class="data-table">
+      <thead><tr><th>MAG A</th><th>MAG B</th><th>Composition similarity</th><th>Mean GC difference</th><th>Flag</th></tr></thead>
+      <tbody>${redundancyPairs.map((p) => `<tr>
+        <td>${p.magIdA}</td>
+        <td>${p.magIdB}</td>
+        <td class="num">${p.compositionSimilarity.toFixed(3)}</td>
+        <td class="num">${(p.meanGcDiff * 100).toFixed(2)}%</td>
+        <td>${p.likelyDuplicate ? '⚠ possible duplicate' : ''}</td>
+      </tr>`).join('')}</tbody>
+    </table>
+  `;
+}
+
 async function renderContigTable(records, binTablesByTool) {
   const sorted = [...records].sort((a, b) => b.length - a.length);
   const totalLength = sorted.reduce((sum, r) => sum + r.length, 0);
@@ -411,6 +494,7 @@ async function renderContigTable(records, binTablesByTool) {
     ${reconciliationCard}
     ${outlierCard}
     ${tools.length > 0 ? '<div class="card" id="interactive-card"></div>' : ''}
+    ${reconciliationResult ? '<div class="card" id="qc-card"></div>' : ''}
     ${perToolBinCards}
     <div class="card">
       <h3>Per-contig properties</h3>
@@ -427,6 +511,7 @@ async function renderContigTable(records, binTablesByTool) {
   explorer.style.display = 'flex';
 
   if (tools.length > 0) initInteractiveSection(records, binTablesByTool, reconciliationResult);
+  if (reconciliationResult) initQcSection(records, reconciliationResult);
 }
 
 // Parsing runs in a Worker (src/workers/fasta-worker.js) rather than on the
