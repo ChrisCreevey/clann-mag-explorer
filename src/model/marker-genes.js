@@ -35,20 +35,21 @@ const DEFAULT_PARAMS = {
   minCoverage: 0.5,      // aligned region must cover at least this fraction of the reference's length
   minMargin: 10,         // best family's score must beat the next-best family's by at least this much
   minRepresentatives: 2,  // at least this many distinct representatives in a family must independently clear threshold
-  maxSeedsPerSegment: 150, // cap seed generation per stop-delimited ORF segment (see reduced-alphabet.js) — perf lever, not a detection-quality knob
-  // Only try every Nth window per segment (see reduced-alphabet.js) — perf
-  // lever, cuts index-lookup/diagonal-map volume which dominates
-  // single-threaded runtime. Swept against real assembly data (5000
-  // contigs): stride 4 was both the fastest and the highest-recall of
-  // {1,2,3,4} at this cap, because striding lets the same maxSeedsPerSegment
-  // budget reach further into a long ORF instead of exhausting itself on
-  // the first ~150 consecutive residues — raising the cap further (250,
-  // 400) plateaued at the same recall for no extra cost, so there's no
-  // reason to go higher than 150/4 here. Recall is still a few percent
-  // below fully-dense seeding (stride 1, uncapped) on very long segments
-  // whose only homologous region starts unusually late — acceptable for
-  // this tool's "lightweight visualizer, not production" framing.
-  seedStride: 4,
+  // Seed-volume perf levers (see reduced-alphabet.js's forEachReducedKmer)
+  // — not detection-quality knobs on their own. minSeedStride thins every
+  // segment uniformly (real assemblies are dominated by short segments
+  // from frequent stop codons in non-coding-frame noise, so this is what
+  // actually cuts most of the lookup volume); maxSeedsPerSegment then
+  // widens the stride further, but only on segments long enough to
+  // otherwise exceed it, so a long ORF still gets sampled across its full
+  // length rather than only its front. Swept against real assembly data:
+  // minSeedStride 4 + maxSeedsPerSegment 150 was a reasonable cost/recall
+  // tradeoff for this tool's "lightweight visualizer, not production"
+  // framing (index-lookup/diagonal-map bookkeeping, not extension,
+  // dominates single-threaded runtime, so this is the highest-leverage
+  // single-threaded lever).
+  minSeedStride: 4,
+  maxSeedsPerSegment: 150,
 };
 
 // ---- Binary asset parsing ----
@@ -173,7 +174,7 @@ const MIN_SEEDS_PER_DIAGONAL = 2;
  * into `bestByRefSeqId` (refSeqId -> best-scoring extension seen across
  * all six frames so far).
  */
-function searchFrameAgainstIndex(frameStr, frameIdx, assets, xDrop, bestByRefSeqId, maxSeedsPerSegment, seedStride) {
+function searchFrameAgainstIndex(frameStr, frameIdx, assets, xDrop, bestByRefSeqId, maxSeedsPerSegment, minSeedStride) {
   const { k, keyOffsets, hitRefSeqId, hitPosition } = assets.index;
   const { seqOffsets, residues } = assets.refSeqs;
   const diagonals = new Map(); // diagKey -> { count, framePos, refPos, extended }
@@ -203,7 +204,7 @@ function searchFrameAgainstIndex(frameStr, frameIdx, assets, xDrop, bestByRefSeq
         bestByRefSeqId.set(refSeqId, { ...result, frame: frameIdx, refSeqId });
       }
     }
-  }, maxSeedsPerSegment, seedStride);
+  }, maxSeedsPerSegment, minSeedStride);
 }
 
 /**
@@ -247,7 +248,7 @@ function resolveParams(family, p) {
 function computeFamilyCandidates(sixFrameTranslations, assets, p) {
   const bestByRefSeqId = new Map();
   sixFrameTranslations.forEach((frameStr, frameIdx) => {
-    searchFrameAgainstIndex(frameStr, frameIdx, assets, p.xDrop, bestByRefSeqId, p.maxSeedsPerSegment, p.seedStride);
+    searchFrameAgainstIndex(frameStr, frameIdx, assets, p.xDrop, bestByRefSeqId, p.maxSeedsPerSegment, p.minSeedStride);
   });
 
   const { seqOffsets, familyIndex, taxId } = assets.refSeqs;

@@ -37,52 +37,61 @@ MURPHY10_GROUPS.forEach((group, groupIdx) => {
  * @param {string} aaSeq
  * @param {number} k
  * @param {(code: number, position: number) => void} onWindow
- * @param {number} [maxSeedsPerSegment] - once a stop/X-delimited segment
- *   (the same segmentation forEachReducedKmer already gets for free from
- *   GROUP_INDEX rejecting '*'/'X') has emitted this many windows, further
- *   windows in that segment are skipped until the next segment break. A
- *   genuine marker hit anchors near the start of its homologous region, so
- *   this caps the seed volume (and downstream index-lookup/diagonal-map
- *   cost) per long ORF without touching extension, which still runs
- *   against the full segment once a candidate diagonal is found.
- * @param {number} [stride] - only every `stride`-th valid window within a
- *   segment is actually emitted (the skipped windows still update the
- *   rolling hash so the emitted ones are correct, they're just not passed
- *   to onWindow). Measured against the real reference index, a query
- *   window's index lookup pulls ~10+ hits on average and every one costs a
- *   diagonal-map get/set — that per-hit bookkeeping, not k-mer generation
- *   or extension, dominates single-threaded runtime, so cutting the number
- *   of *lookups* (not just per-segment length) is the highest-leverage
- *   single-threaded lever. Safe as long as MIN_SEEDS_PER_DIAGONAL worth of
- *   sampled positions still fall inside any real homologous region — a
- *   region has to be shorter than roughly stride * MIN_SEEDS_PER_DIAGONAL
- *   residues to be missed entirely, well below anything minCoverage would
- *   accept anyway.
+ * @param {number} [maxSeedsPerSegment] - each stop/X-delimited segment (the
+ *   same segmentation this function already gets for free from GROUP_INDEX
+ *   rejecting '*'/'X') emits at most roughly this many windows.
+ * @param {number} [minStride] - floor on the stride applied to every
+ *   segment regardless of length (default 1 = no floor). Real assemblies
+ *   are dominated by *short* segments (frequent stop codons in
+ *   non-coding-frame noise), so a per-segment cap alone barely touches
+ *   their volume — most of the actual lookup-volume reduction has to come
+ *   from thinning even short segments uniformly. minStride does that; the
+ *   effective stride is max(minStride, ceil(windowCount/maxSeedsPerSegment))
+ *   so a segment long enough to exceed the cap at minStride density gets a
+ *   further-widened stride to still reach its *full* length rather than
+ *   exhausting the budget on its front half (the failure mode a bare fixed
+ *   stride has) — this is systematic, evenly-spaced sampling, not random:
+ *   for a homologous region of length L anywhere in the segment, evenly
+ *   spaced sampling guarantees at least 2 sampled positions fall inside it
+ *   once L exceeds ~2x the effective stride, whereas random sampling at the
+ *   same density only gets that in expectation and has a worse worst case.
+ *   Measured against the real reference index, a query window's index
+ *   lookup pulls ~10+ hits on average and every one costs a diagonal-map
+ *   get/set — that per-hit bookkeeping, not k-mer generation or extension,
+ *   dominates single-threaded runtime, so cutting lookup volume broadly
+ *   (minStride) while still guaranteeing full-length coverage on long
+ *   segments (the cap/stride interaction) is the highest-leverage
+ *   single-threaded perf lever.
  */
-function forEachReducedKmer(aaSeq, k, onWindow, maxSeedsPerSegment, stride) {
-  let code = 0;
-  let validRun = 0;
-  let segSeeds = 0;
-  let segPos = 0;
+function forEachReducedKmer(aaSeq, k, onWindow, maxSeedsPerSegment, minStride) {
+  const n = aaSeq.length;
   const cap = maxSeedsPerSegment || Infinity;
-  const step = stride || 1;
-  const mask = ALPHABET_SIZE ** k;
-  for (let i = 0; i < aaSeq.length; i++) {
-    const g = GROUP_INDEX[aaSeq.charCodeAt(i)];
-    if (g < 0) { validRun = 0; code = 0; segSeeds = 0; segPos = 0; continue; }
-    code = (code * ALPHABET_SIZE + g) % mask;
-    validRun++;
-    if (validRun >= k) {
-      if (segSeeds < cap && segPos % step === 0) {
-        onWindow(code, i - k + 1);
-        segSeeds++;
-      }
-      segPos++;
+  const floorStride = minStride || 1;
+  let segStart = -1;
+  for (let i = 0; i <= n; i++) {
+    const g = i < n ? GROUP_INDEX[aaSeq.charCodeAt(i)] : -1;
+    if (g >= 0) {
+      if (segStart < 0) segStart = i;
+    } else if (segStart >= 0) {
+      emitSegmentWindows(aaSeq, segStart, i, k, cap, floorStride, onWindow);
+      segStart = -1;
     }
   }
 }
 
-const exportsObj = { MURPHY10_GROUPS, ALPHABET_SIZE, GROUP_INDEX, forEachReducedKmer };
+/** Emits up to `cap` k-mer windows from aaSeq[start, end), stride at least `floorStride`, spread across the whole segment if that's not enough to fit within `cap`. */
+function emitSegmentWindows(aaSeq, start, end, k, cap, floorStride, onWindow) {
+  const numWindows = end - start - k + 1;
+  if (numWindows <= 0) return;
+  const stride = Math.max(floorStride, Math.ceil(numWindows / cap));
+  for (let pos = start; pos <= end - k; pos += stride) {
+    let code = 0;
+    for (let j = 0; j < k; j++) code = code * ALPHABET_SIZE + GROUP_INDEX[aaSeq.charCodeAt(pos + j)];
+    onWindow(code, pos);
+  }
+}
+
+const exportsObj = { MURPHY10_GROUPS, ALPHABET_SIZE, GROUP_INDEX, forEachReducedKmer, emitSegmentWindows };
 if (typeof module !== 'undefined' && module.exports) module.exports = exportsObj;
 if (typeof self !== 'undefined') {
   self.ClannMAG = self.ClannMAG || {};
