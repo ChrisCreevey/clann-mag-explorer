@@ -142,7 +142,7 @@ const MAX_HITS_PER_KEY = 20;
 // singleton keys are the ones least likely to be load-bearing on their own.
 // Checked against real assembly data (not just reasoned about) before
 // shipping — see the commit message for the actual measured recall delta.
-const MIN_HITS_PER_KEY = 2;
+const MIN_HITS_PER_KEY = 3;
 
 function buildIndexBinary(records) {
   // sortedKeys is a Uint32Array — a k-mer code >= 2^32 would silently wrap
