@@ -1,5 +1,7 @@
 # Clann MAG Explorer
 
+## USE THE TOOL HERE: https://chriscreevey.github.io/clann-mag-explorer/
+
 A browser-only tool for exploring and manually refining prokaryotic MAG (metagenome-assembled genome) binning
 results from a single assembly. Fifth tool in the [Clann suite](https://chriscreevey.github.io/), alongside
 [Clann Tree Viewer](https://chriscreevey.github.io/clann-tree-viewer/),
