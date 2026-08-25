@@ -22,12 +22,8 @@ const THEME_KEY = 'clann-mag-explorer-theme';
 // Session-level interactive-reassignment state — deliberately module-level
 // (not passed around as parameters) since it needs to survive across
 // scatter-plot re-renders and outlives any single render() call. Reset on
-// every fresh assembly load (loadAssembly), including the unsaved-work
-// flag, matching the brief's "the tool must intercept navigation away
-// ... once any reassignment has been made in the session" — a new session
-// starts clean.
+// every fresh assembly load (loadAssembly) — a new session starts clean.
 let workingAssignment = new Map();
-let hasUnsavedReassignments = false;
 let scatterPlotHandle = null;
 
 // Phase 9 export: the loaded assembly's own File (re-sliced via
@@ -40,8 +36,19 @@ let scatterPlotHandle = null;
 let currentAssemblyFile = null;
 let currentRecords = [];
 
+// Broader than the brief's original design (docs/clann-mag-explorer-brief.md
+// §Unsaved-work protection, which armed this only after the first contig
+// reassignment, deliberately not before, "so it doesn't nag a student
+// who's only exploring"). Changed on direct request: any successfully
+// loaded assembly now arms the guard, not just an edited one — losing the
+// in-memory File reference (needed for per-MAG FASTA extraction, see
+// currentAssemblyFile above) on an accidental navigation is disruptive
+// even before any reassignment has been made. Gated on currentRecords
+// (set once renderContigTable runs after a successful parse — see below),
+// not currentAssemblyFile (set as soon as a load is attempted, before
+// parsing finishes), so a failed/in-progress load doesn't arm this.
 window.addEventListener('beforeunload', (e) => {
-  if (!hasUnsavedReassignments) return;
+  if (currentRecords.length === 0) return;
   e.preventDefault();
   e.returnValue = ''; // required by some browsers to trigger the native confirmation dialog
 });
@@ -250,7 +257,6 @@ function initInteractiveSection(records, binTablesByTool, reconciliationResult) 
   const { createScatterPlot } = window.ClannMAG.scatter;
 
   workingAssignment = deriveInitialAssignment(binTablesByTool, reconciliationResult);
-  hasUnsavedReassignments = false;
 
   const AXES = {
     gcContent: { label: 'GC%', get: (r) => r.gcContent * 100 },
@@ -362,7 +368,6 @@ function initInteractiveSection(records, binTablesByTool, reconciliationResult) 
       targetBinId = name;
     }
     workingAssignment = reassignContigs(workingAssignment, selectedIds, targetBinId);
-    hasUnsavedReassignments = true;
     rerenderScatterColors();
     scatterPlotHandle.clearSelection();
     renderWorkingBins();
