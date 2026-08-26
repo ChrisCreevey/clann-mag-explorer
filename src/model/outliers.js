@@ -88,7 +88,40 @@ function computeBinOutliers(binContigs) {
   return result;
 }
 
-const exportsObj = { centroid, euclideanDistance, computeCentroidZScores, computeBinOutliers };
+// Thresholds behind the outlier card's "Flags" column (brief's combined-
+// signal ranking) — exposed as adjustable parameters (not hardcoded) so
+// students can see how sensitive the ranking is to where these lines are
+// drawn, same "thresholds shown and adjustable" framing as bin-summary.js's
+// MIMAG thresholds. Kept separate from computeBinOutliers itself: the
+// z-scores/distances are real measurements computed once from the data,
+// or "does the current line count this as a flag" is a cheap, purely
+// numeric decision that's fine to redo on every threshold change.
+const DEFAULT_OUTLIER_PARAMS = {
+  zThreshold: 2, // combinedZ strictly above this counts as a compositional/coverage outlier
+  taxDistanceThreshold: 0, // marker taxonomic distance strictly above this counts as a flag
+};
+
+/**
+ * @param {{combinedZ:number, redundantOnly:boolean, taxDistance:number|null,
+ *   krakenDisagrees:boolean, agreementFraction:number|null}} flag - one
+ *   contig's raw per-signal values (app.js's computeOutlierFlags)
+ * @param {object} [params] - overrides for DEFAULT_OUTLIER_PARAMS
+ */
+function computeFlagCount(flag, params) {
+  const p = { ...DEFAULT_OUTLIER_PARAMS, ...params };
+  let count = 0;
+  if (flag.combinedZ > p.zThreshold) count++;
+  if (flag.redundantOnly) count++;
+  if (flag.taxDistance !== null && flag.taxDistance > p.taxDistanceThreshold) count++;
+  if (flag.krakenDisagrees) count++;
+  if (flag.agreementFraction !== null && flag.agreementFraction < 1) count++;
+  return count;
+}
+
+const exportsObj = {
+  centroid, euclideanDistance, computeCentroidZScores, computeBinOutliers,
+  DEFAULT_OUTLIER_PARAMS, computeFlagCount,
+};
 if (typeof module !== 'undefined' && module.exports) module.exports = exportsObj;
 if (typeof self !== 'undefined') {
   self.ClannMAG = self.ClannMAG || {};

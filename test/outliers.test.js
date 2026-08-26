@@ -1,5 +1,5 @@
 const { test, report, assert } = require('./harness');
-const { centroid, euclideanDistance, computeCentroidZScores, computeBinOutliers } = require('../src/model/outliers');
+const { centroid, euclideanDistance, computeCentroidZScores, computeBinOutliers, computeFlagCount, DEFAULT_OUTLIER_PARAMS } = require('../src/model/outliers');
 
 test('centroid is the mean of each dimension', () => {
   assert.deepStrictEqual(centroid([[0, 0], [2, 4]]), [1, 2]);
@@ -61,6 +61,26 @@ test('computeBinOutliers falls back to composition-only if even one contig lacks
   const result = computeBinOutliers(binContigs);
   assert.strictEqual(result.get('a').coverageZ, null);
   assert.strictEqual(result.get('b').coverageZ, null);
+});
+
+test('computeFlagCount uses the default z/tax thresholds when no overrides are given', () => {
+  const flag = { combinedZ: 2.5, redundantOnly: false, taxDistance: null, krakenDisagrees: false, agreementFraction: null };
+  assert.strictEqual(computeFlagCount(flag, DEFAULT_OUTLIER_PARAMS), 1); // only combinedZ > 2 fires
+});
+
+test('computeFlagCount respects a raised z threshold, dropping a flag that used to count', () => {
+  const flag = { combinedZ: 2.5, redundantOnly: false, taxDistance: null, krakenDisagrees: false, agreementFraction: null };
+  assert.strictEqual(computeFlagCount(flag, { zThreshold: 3 }), 0);
+});
+
+test('computeFlagCount counts every independent signal, not just the first that fires', () => {
+  const flag = { combinedZ: 5, redundantOnly: true, taxDistance: 2, krakenDisagrees: true, agreementFraction: 0.5 };
+  assert.strictEqual(computeFlagCount(flag, DEFAULT_OUTLIER_PARAMS), 5);
+});
+
+test('computeFlagCount treats a null taxDistance as "no signal", not "below threshold"', () => {
+  const flag = { combinedZ: 0, redundantOnly: false, taxDistance: null, krakenDisagrees: false, agreementFraction: null };
+  assert.strictEqual(computeFlagCount(flag, { taxDistanceThreshold: -1 }), 0);
 });
 
 report();

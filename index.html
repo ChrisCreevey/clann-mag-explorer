@@ -59,8 +59,18 @@
       <button id="load-selected-btn" class="act" type="button" style="display: none;">Load selected</button>
 
       <details class="sect" id="rowFilters">
-        <summary>Filters &amp; search</summary>
+        <summary>Contig filters</summary>
         <div id="filtersSectionBody"></div>
+      </details>
+
+      <details class="sect" id="rowMagFilters">
+        <summary>MAG filters</summary>
+        <div id="magFiltersSectionBody"></div>
+      </details>
+
+      <details class="sect" id="rowParams">
+        <summary>Thresholds &amp; parameters</summary>
+        <div id="paramsSectionBody"></div>
       </details>
 
       <details class="sect" id="rowTools">
@@ -160,6 +170,7 @@
   <script src="src/model/blosum62.js"></script>
   <script src="src/model/marker-genes.js"></script>
   <script src="src/model/filters.js"></script>
+  <script src="src/model/mag-filters.js"></script>
   <script src="src/viz/scatter-geometry.js"></script>
   <script src="src/viz/scatter.js"></script>
   <script src="src/viz/network-geometry.js"></script>
