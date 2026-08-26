@@ -2,7 +2,7 @@
   "defaultParams": {
     "xDrop": 15,
     "minScore": 50,
-    "minCoverage": 0.5,
+    "minCoverage": 0.3,
     "minMargin": 10,
     "minRepresentatives": 2,
     "minSeedStride": 4,
