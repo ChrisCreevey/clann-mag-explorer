@@ -1459,6 +1459,69 @@ function renderOutlierCard(flags, { hasCoverage, hasTaxonomy, hasKraken, hasCros
   `;
 }
 
+function renderContigMatchNotices(notices) {
+  const el = document.getElementById('contigMatchNotices');
+  if (!el) return;
+  el.innerHTML = notices
+    .map((n) => `<div class="hint${n.level === 'warning' ? ' hint-warn' : ''}">${n.level === 'warning' ? '⚠' : '✓'} ${n.message}</div>`)
+    .join('');
+}
+
+/**
+ * Best-attempt contig ID matching (src/model/contig-id-matching.js) run
+ * once per load, before the real streaming parse: some binning tools
+ * (CONCOCT's default contig-splitting step, most concretely) rewrite
+ * contig IDs before clustering, which otherwise makes every one of that
+ * tool's rows silently fail to match the assembly and contribute nothing
+ * to bin summaries or reconciliation — not because the tool was run
+ * against a different assembly, but because of a known, mechanical naming
+ * convention. A quick header-only pre-scan of the assembly (scanContigIds
+ * — no per-contig stats, unlike the real parse) gets the real contig ID
+ * set needed to detect and fix this per tool; a tool whose IDs still
+ * don't resolve well after checking known conventions gets a visible
+ * warning instead, since that's the genuine "this might be a different
+ * assembly version" signal the brief's provenance concern is about, and
+ * guessing further would just produce confident-looking wrong results.
+ */
+async function bestAttemptMatchBinTables(assemblyFile, binTablesByTool) {
+  const { scanContigIds } = window.ClannMAG.fastaIndex;
+  const { bestAttemptRemapAssignments, HIGH_MATCH_THRESHOLD } = window.ClannMAG.contigIdMatching;
+
+  setBusy(true);
+  showError('Checking contig IDs against the assembly…');
+  let referenceIds;
+  try {
+    referenceIds = await scanContigIds(assemblyFile);
+  } finally {
+    setBusy(false);
+    showError(null);
+  }
+
+  const remapped = new Map();
+  const notices = [];
+  for (const [tool, assignments] of binTablesByTool) {
+    const { assignments: fixedAssignments, report } = bestAttemptRemapAssignments(assignments, referenceIds);
+    remapped.set(tool, fixedAssignments);
+    if (report.applied) {
+      notices.push({
+        tool, level: 'fixed',
+        message: `${tool}: contig IDs used the ${report.patternLabel}; stripped automatically `
+          + `(${(report.matchRateBefore * 100).toFixed(0)}% → ${(report.matchRateAfter * 100).toFixed(0)}% matched the assembly)`
+          + `${report.collapsedCount ? `, ${report.collapsedCount.toLocaleString()} split contig(s) merged back via majority vote across their parts` : ''}.`,
+      });
+    } else if (report.matchRateBefore < HIGH_MATCH_THRESHOLD) {
+      notices.push({
+        tool, level: 'warning',
+        message: `${tool}: only ${(report.matchRateAfter * 100).toFixed(0)}% of its contig IDs match the loaded assembly, `
+          + `even after checking known naming conventions — it may have been run against a different assembly version. `
+          + `Its bin calls will mostly be skipped as unmatched; consider excluding it from the comparison.`,
+      });
+    }
+  }
+  renderContigMatchNotices(notices);
+  return remapped;
+}
+
 function initFilePicker() {
   const input = document.getElementById('folder-input');
   const openButtons = [document.getElementById('uploadBtn'), document.getElementById('emptyOpen')];
@@ -1466,6 +1529,7 @@ function initFilePicker() {
   input.addEventListener('change', async () => {
     const files = [...input.files];
     if (files.length === 0) return;
+    renderContigMatchNotices([]);
 
     let assemblyFile = null;
     for (const file of files) {
@@ -1480,8 +1544,12 @@ function initFilePicker() {
       ? await findAuxiliaryFiles(otherFiles)
       : { binTablesByTool: null, coverageTable: null, krakenCalls: null };
 
+    const matchedBinTablesByTool = binTablesByTool
+      ? await bestAttemptMatchBinTables(assemblyFile, binTablesByTool)
+      : null;
+
     try {
-      await loadAssembly(assemblyFile, binTablesByTool, coverageTable, krakenCalls);
+      await loadAssembly(assemblyFile, matchedBinTablesByTool, coverageTable, krakenCalls);
     } catch {
       // already surfaced via showError inside loadAssembly
     }

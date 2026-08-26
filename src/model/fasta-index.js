@@ -117,7 +117,44 @@ async function streamFasta(blob, onContig) {
   return { contigCount, totalLength, sourceCompressed };
 }
 
-const exportsObj = { streamFasta, isGzipped };
+/**
+ * Header-only pre-scan: every contig ID the assembly has, without any of
+ * streamFasta's per-contig stats work (composition, GC, coding density,
+ * ...) — used before the real load to best-attempt-match a bin table's
+ * contig IDs against the assembly (src/model/contig-id-matching.js), which
+ * needs to know the assembly's real ID set before bin tables are used for
+ * anything (including deciding which contigs the full parse even keeps).
+ * Cheap relative to the full parse: no sequence accumulation, no stats.
+ * @param {Blob} blob
+ * @returns {Promise<Set<string>>}
+ */
+async function scanContigIds(blob) {
+  const sourceCompressed = await isGzipped(blob);
+  const stream = sourceCompressed
+    ? blob.stream().pipeThrough(new DecompressionStream('gzip'))
+    : blob.stream();
+  const reader = stream.getReader();
+  const decoder = new TextDecoder('utf-8');
+  const ids = new Set();
+
+  let carry = '';
+  const processLine = (line) => {
+    if (line.startsWith('>')) ids.add(line.slice(1).trim().split(/\s+/)[0]);
+  };
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    carry += decoder.decode(value, { stream: true });
+    const lines = carry.split('\n');
+    carry = lines.pop();
+    for (const line of lines) processLine(line);
+  }
+  carry += decoder.decode();
+  if (carry.length) processLine(carry);
+  return ids;
+}
+
+const exportsObj = { streamFasta, isGzipped, scanContigIds };
 if (typeof module !== 'undefined' && module.exports) module.exports = exportsObj;
 if (typeof self !== 'undefined') {
   self.ClannMAG = self.ClannMAG || {};

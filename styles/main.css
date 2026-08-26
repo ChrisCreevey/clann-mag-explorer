@@ -98,6 +98,7 @@ button.act.warn{color:var(--warn);border-color:var(--warn)}
 button.act.warn:hover{background:var(--warn);color:#fff}
 
 .hint{color:var(--muted);font-size:11px;margin-top:7px;line-height:1.45}
+.hint-warn{color:var(--warn)}
 code{background:var(--panel);border:1px solid var(--line);padding:0.05rem 0.3rem;border-radius:3px;
   font-family:var(--font-mono);font-size:0.9em}
 
