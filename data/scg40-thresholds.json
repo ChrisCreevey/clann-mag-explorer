@@ -14,6 +14,33 @@
     },
     "COG0525": {
       "minRepresentatives": 1
+    },
+    "COG0012": {
+      "minRepresentatives": 1
+    },
+    "COG0016": {
+      "minRepresentatives": 1
+    },
+    "COG0018": {
+      "minRepresentatives": 1
+    },
+    "COG0085": {
+      "minRepresentatives": 1
+    },
+    "COG0124": {
+      "minRepresentatives": 1
+    },
+    "COG0201": {
+      "minRepresentatives": 1
+    },
+    "COG0202": {
+      "minRepresentatives": 1
+    },
+    "COG0215": {
+      "minRepresentatives": 1
+    },
+    "COG0552": {
+      "minRepresentatives": 1
     }
   }
 }
