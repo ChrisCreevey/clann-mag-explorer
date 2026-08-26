@@ -299,6 +299,11 @@ resolves each family's effective parameters as `DEFAULT_PARAMS < assets.threshol
 shipped asset. 8 new tests (3 for the override resolution/precedence behavior, 5 for `build/03-calibrate.js`'s
 `evenSample`/`percentile` helpers) — 48 tests total, all passing.
 
+**Later update**: this held-out-set calibration was explicitly flagged above as not a substitute for testing
+against real, non-enriched assemblies. See [scg-blast-verification.md](scg-blast-verification.md) for that
+follow-up — an independent BLAST-based recall check against a real assembly that found and fixed a materially
+larger recall gap (`minCoverage`, not covered by this script at all) than anything visible from held-out data alone.
+
 ## Phase 4 findings — single binning-result loading and bin summaries
 
 **Scope**: brief's Phase 4 is deliberately single-tool (one contig->bin table); cross-tool reconciliation
