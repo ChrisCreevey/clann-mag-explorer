@@ -68,6 +68,17 @@ function defaultGlobalParams() {
     minJaccard: 0.1,
     outlier: { ...window.ClannMAG.outliers.DEFAULT_OUTLIER_PARAMS },
     magDuplicateSimilarity: 0.95,
+    // Recall-adjustment for completeness/redundancy (docs/scg-blast-
+    // verification.md) — see bin-summary.js's DEFAULT_ESTIMATED_RECALL
+    // for why this correction exists at all: the built-in marker search
+    // is a fast, approximate heuristic (not a profile-HMM search), and an
+    // independent BLAST verification measured it only recovers ~74% of
+    // genuinely-present marker genes even after this app's own threshold
+    // tuning. Reading "families found / 40" as completeness would
+    // silently understate every genuinely-complete genome by roughly
+    // that same gap; dividing by the measured recall rate corrects for
+    // it instead of reporting a number known to be biased low.
+    recallRate: window.ClannMAG.binSummary.DEFAULT_ESTIMATED_RECALL,
   };
 }
 let currentParams = null;
@@ -171,7 +182,7 @@ function formatMimagTier(tier) {
 
 function renderBinSummaryCard(records, binAssignments, toolLabel) {
   const { computeBinSummaries } = window.ClannMAG.binSummary;
-  const { summaries, unmatchedContigIds } = computeBinSummaries(records, binAssignments, { thresholds: currentParams.mimag });
+  const { summaries, unmatchedContigIds } = computeBinSummaries(records, binAssignments, { thresholds: currentParams.mimag, recallRate: currentParams.recallRate });
 
   const rows = summaries
     .map((b) => `<tr>
@@ -194,13 +205,13 @@ function renderBinSummaryCard(records, binAssignments, toolLabel) {
   return `
     <div class="card">
       <h3>Bin summaries${toolLabel ? ` — ${toolLabel}` : ''}</h3>
-      <div class="row-count">${summaries.length.toLocaleString()} bins, largest first &middot; completeness/redundancy from the built-in marker-gene search (40 families) &middot; MIMAG-style tier is a completeness/contamination proxy only, not the full standard (no rRNA/tRNA check)</div>
+      <div class="row-count">${summaries.length.toLocaleString()} bins, largest first &middot; completeness/redundancy from the built-in marker-gene search (40 families), corrected for its measured recall (currently ${(currentParams.recallRate * 100).toFixed(0)}% &mdash; see Thresholds &amp; parameters) since it is a fast, approximate search, not a profile-HMM one &middot; MIMAG-style tier is a completeness/contamination proxy only, not the full standard (no rRNA/tRNA check)</div>
       <div class="table-wrap scroll-panel">
         <table class="data-table">
           <thead><tr>
             <th>Bin</th><th>Contigs</th><th>Length</th><th>N50</th><th>L50</th><th>Mean GC</th>
-            <th title="Fraction of the 40 marker families found anywhere in this bin">Completeness</th>
-            <th title="Fraction of found families that appear on more than one contig — a proxy for contamination">Redundancy</th>
+            <th title="Fraction of the 40 marker families found anywhere in this bin, divided by the assumed marker-search recall rate (Thresholds & parameters) and capped at 100% — corrects for the search's known tendency to under-call, rather than reading the raw fraction as if it were the true answer">Completeness</th>
+            <th title="Families found on more than one contig (too many copies of a should-be-single-copy gene — a contamination proxy), scaled by the same recall-adjusted expected-family count as Completeness rather than by however many families this bin happened to find, so a poorly-recovered bin's small sample doesn't swing this number on noise">Redundancy</th>
             <th>Tier</th>
           </tr></thead>
           <tbody>${rows}</tbody>
@@ -225,7 +236,7 @@ function computeMagSummaryData(records, result) {
   const recordsById = new Map(records.map((r) => [r.id, r]));
   return result.putativeMags.map((mag) => {
     const coreRecords = mag.coreContigIds.map((id) => recordsById.get(id)).filter(Boolean);
-    const { completeness, redundancy } = computeCompletenessRedundancy(coreRecords);
+    const { completeness, redundancy } = computeCompletenessRedundancy(coreRecords, currentParams.recallRate);
     return {
       magId: mag.magId,
       coreCount: mag.coreContigIds.length,
@@ -301,15 +312,15 @@ function renderReconciliationCard(records, result, filteredIds, magSummaryData, 
   return `
     <div class="card">
       <h3>Cross-tool reconciliation</h3>
-      <div class="row-count">${tools.length} tools loaded (${tools.join(', ')}) &middot; ${magSummaryByMagId.size.toLocaleString()} putative MAGs matched by contig overlap (reciprocal best hit, min Jaccard ${currentParams.minJaccard}) &middot; ${filteredMagIds.size.toLocaleString()} of ${magSummaryByMagId.size.toLocaleString()} match the current MAG filters &middot; completeness/redundancy below are computed from each MAG's high-confidence core (unanimous-agreement) contigs only</div>
+      <div class="row-count">${tools.length} tools loaded (${tools.join(', ')}) &middot; ${magSummaryByMagId.size.toLocaleString()} putative MAGs matched by contig overlap (reciprocal best hit, min Jaccard ${currentParams.minJaccard}) &middot; ${filteredMagIds.size.toLocaleString()} of ${magSummaryByMagId.size.toLocaleString()} match the current MAG filters &middot; completeness/redundancy below are computed from each MAG's high-confidence core (unanimous-agreement) contigs only, recall-adjusted (see Thresholds &amp; parameters)</div>
       <div class="table-wrap scroll-panel">
         <table class="data-table">
           <thead><tr>
             <th>Putative MAG</th>
             <th title="Contigs every voting tool agrees belong to this MAG">Core</th>
             <th title="Contigs assigned here by some but not all voting tools">Disputed</th>
-            <th>Completeness</th>
-            <th>Redundancy</th>
+            <th title="Recall-adjusted — see the Bin summaries card's Completeness column note">Completeness</th>
+            <th title="Recall-adjusted — see the Bin summaries card's Redundancy column note">Redundancy</th>
             <th>Tier</th>
             ${tools.map((t) => `<th>${t}</th>`).join('')}
           </tr></thead>
@@ -468,7 +479,7 @@ function initInteractiveSection(records, binTablesByTool, reconciliationResult) 
   }
 
   function renderWorkingBins() {
-    const { summaries } = computeBinSummaries(records, assignmentToRows(workingAssignment), { thresholds: currentParams.mimag });
+    const { summaries } = computeBinSummaries(records, assignmentToRows(workingAssignment), { thresholds: currentParams.mimag, recallRate: currentParams.recallRate });
     const rows = summaries
       .map((b) => `<tr>
         <td>${b.binId}</td>
@@ -481,7 +492,7 @@ function initInteractiveSection(records, binTablesByTool, reconciliationResult) 
       .join('');
     document.getElementById('workingBinsWrap').innerHTML = `
       <table class="data-table">
-        <thead><tr><th>Bin</th><th>Contigs</th><th>Length</th><th>Completeness</th><th>Redundancy</th><th>Tier</th></tr></thead>
+        <thead><tr><th>Bin</th><th>Contigs</th><th>Length</th><th title="Recall-adjusted — see the Bin summaries card's Completeness column note">Completeness</th><th title="Recall-adjusted — see the Bin summaries card's Redundancy column note">Redundancy</th><th>Tier</th></tr></thead>
         <tbody>${rows}</tbody>
       </table>
     `;
@@ -572,7 +583,7 @@ function initQcSection(records, reconciliationResult, filteredMagIds) {
   const magAssignmentRows = putativeMags.flatMap((mag) =>
     [...mag.coreContigIds, ...mag.disputedContigIds].map((contigId) => ({ contigId, binId: mag.magId }))
   );
-  const { summaries: magSummaries } = computeBinSummaries(records, magAssignmentRows, { thresholds: currentParams.mimag });
+  const { summaries: magSummaries } = computeBinSummaries(records, magAssignmentRows, { thresholds: currentParams.mimag, recallRate: currentParams.recallRate });
 
   const card = document.getElementById('qc-card');
   card.innerHTML = `
@@ -585,7 +596,7 @@ function initQcSection(records, reconciliationResult, filteredMagIds) {
       <div><div class="row-count" id="qcBadLabel"></div><div id="qcBadScatter"></div></div>
     </div>
     <h4>Completeness vs. contamination, all putative MAGs</h4>
-    <div class="row-count">${magSummaries.length.toLocaleString()} putative MAG(s), coloured by which tool(s) support each one. X axis: completeness %. Y axis: redundancy % (contamination proxy).</div>
+    <div class="row-count">${magSummaries.length.toLocaleString()} putative MAG(s), coloured by which tool(s) support each one. X axis: completeness % (recall-adjusted). Y axis: redundancy % (contamination proxy, recall-adjusted).</div>
     <div id="magQcScatter"></div>
     <h4>Possible duplicate genomes</h4>
     <div class="row-count" id="redundancyNote"></div>
@@ -726,7 +737,7 @@ function initExportSection() {
 
   document.getElementById('exportSummaryBtn').addEventListener('click', () => {
     refreshBinOptions();
-    const { summaries } = computeBinSummaries(currentRecords, assignmentToRows(workingAssignment), { thresholds: currentParams.mimag });
+    const { summaries } = computeBinSummaries(currentRecords, assignmentToRows(workingAssignment), { thresholds: currentParams.mimag, recallRate: currentParams.recallRate });
     const csv = binSummaryToCsv(summaries);
     triggerDownload(new Blob([csv], { type: 'text/csv' }), 'bin-summary.csv');
   });
@@ -903,7 +914,8 @@ function renderParamsSection() {
 
   body.innerHTML = `
     <div class="hint">These control how the tool's own derived calls (quality tiers, bin matching, outlier flags, duplicate detection) are drawn — adjust them to see how sensitive the results are to where the lines sit.</div>
-    <div class="row"><label title="Completeness/contamination proxy only — see the bin summary note">MIMAG High: completeness &gt;</label><input type="number" id="paramMimagHighComp" min="0" max="100" value="${p.mimag.highMinCompleteness}"></div>
+    <div class="row"><label title="The built-in marker-gene search is a fast, approximate heuristic, not a profile-HMM search — an independent BLAST verification (docs/scg-blast-verification.md) measured it recovers only about this fraction of genuinely-present marker genes, even after this app's own threshold tuning. Completeness/redundancy below are divided by this rate rather than read raw off the family-hit count, which would otherwise understate every genuinely-complete genome by roughly this same gap.">Assumed marker-search recall</label><input type="number" id="paramRecallRate" min="0.01" max="1" step="0.01" value="${p.recallRate}"></div>
+    <div class="row"><label title="Completeness/contamination proxy only, and now corrected for the assumed recall rate above — see the bin summary note">MIMAG High: completeness &gt;</label><input type="number" id="paramMimagHighComp" min="0" max="100" value="${p.mimag.highMinCompleteness}"></div>
     <div class="row"><label>MIMAG High: contamination &lt;</label><input type="number" id="paramMimagHighCont" min="0" max="100" value="${p.mimag.highMaxContamination}"></div>
     <div class="row"><label>MIMAG Medium: completeness ≥</label><input type="number" id="paramMimagMedComp" min="0" max="100" value="${p.mimag.mediumMinCompleteness}"></div>
     <div class="row"><label>MIMAG Medium: contamination &lt;</label><input type="number" id="paramMimagMedCont" min="0" max="100" value="${p.mimag.mediumMaxContamination}"></div>
@@ -935,6 +947,7 @@ function renderParamsSection() {
         taxDistanceThreshold: num('paramTaxDistance', currentParams.outlier.taxDistanceThreshold),
       },
       magDuplicateSimilarity: num('paramMagSimilarity', currentParams.magDuplicateSimilarity),
+      recallRate: Math.max(0.01, Math.min(1, num('paramRecallRate', currentParams.recallRate))),
     };
     if (currentParams.minJaccard !== previousMinJaccard) {
       recomputeLatest(latest.records, latest.binTablesByTool).then(renderFilteredExplorer);

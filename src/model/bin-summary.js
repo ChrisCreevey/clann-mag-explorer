@@ -9,6 +9,27 @@
 
 const TOTAL_MARKER_FAMILIES = 40; // fixed by the shipped reference set (brief §Provisioning)
 
+// The built-in marker-gene search is a fast, approximate seed-and-extend
+// heuristic (src/model/marker-genes.js), not a profile-HMM search — the
+// module's own stated limitation, now with a measured number behind it.
+// docs/scg-blast-verification.md independently verified it against real
+// BLAST (DIAMOND) hits on a real assembly: even with both threshold fixes
+// that investigation shipped, it only recovers ~74% of the individual
+// marker-gene-carrying contigs BLAST confirms are genuinely there — a
+// contig-level detection rate, not a bin-level one, but the right number
+// to correct with here, since it's specifically "given a real single-copy
+// gene sits on some contig, how often does this tool actually call it."
+//
+// Directly reading "families found / 40" as completeness therefore
+// systematically UNDERSTATES a genuinely complete genome — even a bin
+// with every one of its 40 marker genes truly present would only show
+// ~74% "raw" completeness on average, purely from this known recall gap,
+// with no way to tell that apart from a genuinely 74%-complete genome.
+// computeCompletenessRedundancy corrects for this (see below) rather than
+// reporting the raw, known-to-be-biased fraction as if it were the
+// genuine biological answer.
+const DEFAULT_ESTIMATED_RECALL = 0.74;
+
 // MIMAG-style tiers (Bowers et al. 2017), completeness/contamination only —
 // this module has no rRNA/tRNA signal to check the real MIMAG standard's
 // full criteria, so these are a simplified proxy, not a certification.
@@ -30,18 +51,39 @@ function computeN50L50(lengthsDesc, totalLength) {
 }
 
 /**
- * Completeness = fraction of the 40 marker families found anywhere in the
- * bin. Redundancy = fraction of the families that were found (not of all
- * 40) that showed up on more than one contig — the standard CheckM-style
- * contamination proxy (extra copies beyond the expected single copy per
- * family), computed here from Phase 3's per-contig calls rather than a
- * separate whole-bin re-search, since brief §Marker-gene identification
- * module frames per-contig tags as the thing everything downstream
- * aggregates over.
+ * Completeness and redundancy (contamination proxy), both corrected for
+ * the search's known, measured recall gap (DEFAULT_ESTIMATED_RECALL
+ * above) rather than read directly off the raw family-hit counts.
+ *
+ * **Completeness** = fraction of the 40 marker families found anywhere in
+ * the bin, divided by the expected recall rate (capped at 100%) — "if we
+ * only expect to catch ~74% of what's really there, finding 30 of 40
+ * families is evidence of a genuinely much-more-complete genome than a
+ * raw 75% would suggest." A bin that finds every family the tool could
+ * plausibly be expected to find (rawFraction >= recallRate) reads as
+ * (near-)100% complete, not capped artificially low by the search's own
+ * sensitivity ceiling.
+ *
+ * **Redundancy** (contamination proxy) = families found on more than one
+ * contig — genuinely a "too many copies of a single-copy gene" count, not
+ * an inferred one — divided by that SAME expected-detectable-family count
+ * (40 x recall rate), not by however many families this particular bin
+ * happened to have found. Deliberately not "of the families found" (the
+ * previous definition): a poorly-recovered bin that only found 5 families
+ * would otherwise see any 1-2 duplicated among them swing redundancy by
+ * 20-40 points off a tiny sample, noise that has nothing to do with real
+ * contamination. Sharing completeness's denominator keeps both numbers on
+ * the same, less noise-prone scale, and keeps the MIMAG-tier thresholds
+ * (calibrated against "real % complete/contaminated", not against this
+ * tool's raw detection rate) meaningful against them.
+ *
  * @param {object[]} binContigs - this bin's per-contig records, each with
  *   an optional `markerHits: {family: string}[]`
+ * @param {number} [recallRate] - override for DEFAULT_ESTIMATED_RECALL,
+ *   e.g. a student re-running docs/scg-blast-verification.md's method
+ *   against their own real assembly and getting a different number
  */
-function computeCompletenessRedundancy(binContigs) {
+function computeCompletenessRedundancy(binContigs, recallRate = DEFAULT_ESTIMATED_RECALL) {
   const contigsByFamily = new Map(); // family -> Set<contigId>
   for (const contig of binContigs) {
     for (const hit of contig.markerHits || []) {
@@ -55,9 +97,11 @@ function computeCompletenessRedundancy(binContigs) {
     if (contigSet.size > 1) familiesWithMultipleContigs++;
   }
 
-  const completeness = (familiesFound / TOTAL_MARKER_FAMILIES) * 100;
-  const redundancy = familiesFound ? (familiesWithMultipleContigs / familiesFound) * 100 : 0;
-  return { completeness, redundancy, familiesFound };
+  const expectedDetectableFamilies = TOTAL_MARKER_FAMILIES * recallRate;
+  const rawCompleteness = (familiesFound / TOTAL_MARKER_FAMILIES) * 100;
+  const completeness = Math.min(100, (familiesFound / expectedDetectableFamilies) * 100);
+  const redundancy = (familiesWithMultipleContigs / expectedDetectableFamilies) * 100;
+  return { completeness, redundancy, familiesFound, rawCompleteness };
 }
 
 /**
@@ -142,10 +186,12 @@ function mimagTier(completeness, contamination, thresholds) {
  *   (id, length, gcContent, markerHits, ...), keyed by `id`
  * @param {{contigId: string, binId: string}[]} assignments - one binning
  *   tool's contig->bin table
- * @param {{completenessSource?: 'builtin'|'supplied', thresholds?: object}} [options]
+ * @param {{completenessSource?: 'builtin'|'supplied', thresholds?: object, recallRate?: number}} [options]
  *   completenessSource is currently always 'builtin' (the brief's
  *   "supplied pre-computed hits, preferred when present" path is Phase 4+
- *   scope not yet wired to an input parser — see docs/phase1-investigation.md)
+ *   scope not yet wired to an input parser — see docs/phase1-investigation.md).
+ *   recallRate overrides DEFAULT_ESTIMATED_RECALL for the completeness/
+ *   redundancy correction (see computeCompletenessRedundancy).
  * @returns {object[]} one summary per bin, sorted by totalLength descending
  */
 function computeBinSummaries(contigRecords, assignments, options = {}) {
@@ -167,12 +213,12 @@ function computeBinSummaries(contigRecords, assignments, options = {}) {
     const { n50, l50 } = computeN50L50(lengthsDesc, totalLength);
     const meanGc = contigs.reduce((sum, c) => sum + c.gcContent, 0) / contigs.length;
 
-    const { completeness, redundancy, familiesFound } = computeCompletenessRedundancy(contigs);
+    const { completeness, redundancy, familiesFound, rawCompleteness } = computeCompletenessRedundancy(contigs, options.recallRate);
     const tier = mimagTier(completeness, redundancy, options.thresholds);
 
     summaries.push({
       binId, contigCount: contigs.length, totalLength, n50, l50, meanGc,
-      completeness, redundancy, familiesFound, mimagTier: tier,
+      completeness, redundancy, familiesFound, rawCompleteness, mimagTier: tier,
     });
   }
 
@@ -181,7 +227,7 @@ function computeBinSummaries(contigRecords, assignments, options = {}) {
 }
 
 const exportsObj = {
-  TOTAL_MARKER_FAMILIES, DEFAULT_MIMAG_THRESHOLDS,
+  TOTAL_MARKER_FAMILIES, DEFAULT_MIMAG_THRESHOLDS, DEFAULT_ESTIMATED_RECALL,
   computeN50L50, computeCompletenessRedundancy, computeMarkerContributions, computeKrakenDisagreement,
   mimagTier, computeBinSummaries,
 };

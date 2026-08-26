@@ -2,7 +2,14 @@
 
 Status: investigation complete, two threshold changes shipped (see "Changes shipped"). Two follow-up questions
 about closing the remaining gap were also investigated and **not adopted** — see "Gapped extension" and
-"Seed-count-only classification (no extension at all)" below.
+"Seed-count-only classification (no extension at all)" below. The measured recall number itself is now also
+used directly in the tool's own completeness/redundancy math — see "Feeding this back into completeness and
+redundancy" at the end.
+
+**The headline finding to keep in view**: even after everything in this document, the built-in search is still
+a fast, approximate seed-and-extend heuristic recovering roughly three-quarters of genuinely-present marker
+genes — not a profile-HMM search, and not a number that should be read as "the real answer" anywhere it's
+displayed. Every change below is about honestly characterizing and correcting for that gap, not closing it.
 
 ## Why this is a different check from Phase 3's calibration
 
@@ -178,6 +185,29 @@ on **both** recall (72.7% vs. 74.2%) and precision (8.1% vs. 6.7% unsupported) �
 that matches shipped recall while beating shipped precision. Extension isn't overhead that could be trimmed
 away for a faster classifier; it's the step doing the actual discrimination. Not pursued further — no code
 changed as a result of this check (a throwaway script, not added to the module).
+
+## Feeding this back into completeness and redundancy
+
+Having an actual measured recall number changes what "good" and "bad" quality should mean elsewhere in the
+tool, not just what threshold to search with. `src/model/bin-summary.js`'s completeness was previously defined
+as "fraction of the 40 marker families found anywhere in the bin," read directly off the raw hit count — but
+given the ~74% ceiling measured above, even a genuinely 100%-complete genome would only show ~74% raw
+completeness on average, indistinguishable from a genuinely 74%-complete one. Reporting that raw fraction as
+"completeness" isn't a rough estimate, it's a number known to be systematically biased low by a quantified
+amount.
+
+**Completeness is now `min(100, familiesFound / (40 x recallRate))`** — divided by the measured recall rate and
+capped at 100%, rather than read raw. **Redundancy (contamination proxy) is now scaled by that same
+`40 x recallRate` denominator**, not by however many families a given bin happened to find — the previous
+"fraction of found families that are duplicated" definition let a poorly-recovered bin's tiny sample (say, 1 of
+2 found families duplicated) swing redundancy by tens of points on pure noise; sharing completeness's
+denominator keeps both numbers on the same, less noise-prone scale. `recallRate` defaults to `0.74` (this
+document's measured value, `DEFAULT_ESTIMATED_RECALL`) and is exposed as an adjustable "Assumed marker-search
+recall" parameter in the app's Thresholds & parameters panel, so it can be updated if this verification is ever
+re-run and gets a different number, or a student wants to see the effect of assuming a different recall rate
+directly. The existing MIMAG-tier thresholds (90%/50% completeness, 5%/10% contamination) are unchanged, since
+they were always meant to apply to genuine biological completeness/contamination — they were just being fed a
+number that couldn't reach them even for a truly complete genome before this correction.
 
 ## Relationship to Phase 3 calibration
 
