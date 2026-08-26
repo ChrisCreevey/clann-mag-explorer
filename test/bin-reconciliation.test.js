@@ -31,6 +31,34 @@ test('two tools with identical bins produce one putative MAG with full core, no 
   assert.strictEqual(magWithC1.members.length, 2); // one bin from each tool
 });
 
+test('a bin that reciprocal-matches nothing and never wins a contig\'s majority vote is dropped from putativeMags entirely', () => {
+  // Real messy multi-tool input (a near-singleton binner like VAMB
+  // especially) produces exactly this: two tools agree on a large bin,
+  // a third tool puts one of that bin's contigs in its own tiny bin. The
+  // tiny bin's overlap with the big one (1/15) falls below minJaccard, so
+  // it never reciprocal-matches, and it loses every majority vote it
+  // could ever cast (2 tools vs. 1) — it should end up in nobody's
+  // core/disputed set, and NOT appear in putativeMags as a phantom
+  // "putative MAG" with zero contigs, even though its bin ID still shows
+  // up as a minority vote (contigAgreement's `votes`).
+  const bigContigs = Array.from({ length: 15 }, (_, i) => `c${i + 1}`);
+  const toolA = assignments(bigContigs.map((c) => [c, 'bigBin']));
+  const toolB = assignments(bigContigs.map((c) => [c, 'bigBin']));
+  const toolC = assignments([['c1', 'lone1']]); // only opines on c1, in its own tiny bin
+
+  const result = reconcileBins(new Map([['toolA', toolA], ['toolB', toolB], ['toolC', toolC]]));
+
+  assert.strictEqual(result.putativeMags.length, 1, 'lone1 should not survive as its own putative MAG');
+  const bigMag = result.putativeMags[0];
+  // c1 isn't unanimous (toolC dissents), so it's disputed rather than
+  // core — but it still belongs to the 2-tool majority MAG, not to lone1.
+  assert.ok(bigMag.disputedContigIds.includes('c1'), 'c1 goes to the 2-tool majority MAG (as disputed), not the lone tiny bin');
+
+  const c1Agreement = result.contigAgreement.find((c) => c.contigId === 'c1');
+  assert.ok(c1Agreement.votes.toolC, 'toolC\'s vote is still recorded even though its MAG was dropped from putativeMags');
+  assert.notStrictEqual(c1Agreement.votes.toolC, bigMag.magId, 'toolC voted for a different (dropped) MAG than the majority');
+});
+
 test('a contig two tools disagree on is disputed, not core, and ranked in disputedContigsRanked', () => {
   const toolA = assignments([['c1', 'bin.1'], ['c2', 'bin.1'], ['c3', 'bin.1'], ['c4', 'bin.2'], ['c5', 'bin.2']]);
   const toolB = assignments([['c1', 'A'], ['c2', 'A'], ['c3', 'B'], ['c4', 'B'], ['c5', 'B']]);
