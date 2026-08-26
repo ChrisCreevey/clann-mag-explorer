@@ -24,7 +24,27 @@ const THEME_KEY = 'clann-mag-explorer-theme';
 // scatter-plot re-renders and outlives any single render() call. Reset on
 // every fresh assembly load (loadAssembly) — a new session starts clean.
 let workingAssignment = new Map();
+let workingAssignmentInitialized = false; // guards deriveInitialAssignment from re-running (and losing manual edits) when a filter change rebuilds the DOM
 let scatterPlotHandle = null;
+
+// Left-pane filters (brief §Left pane: filters and search) — `currentFilters`
+// is the live filter state (src/model/filters.js's shape), and `latest` is
+// everything about the current load that filtering must NOT recompute:
+// the full record set, the loaded bin tables, the (filter-independent)
+// cross-tool reconciliation result and outlier flags, and the lookup
+// indices filters.js needs. Filtering only changes which subset of that
+// fixed data gets rendered (renderFilteredExplorer), never recomputes
+// reconciliation/outliers/marker search themselves — those describe the
+// whole loaded dataset, not "the dataset restricted to what's currently
+// visible". Reset on every fresh assembly load, same as workingAssignment.
+let currentFilters = null;
+let latest = null;
+
+// Persists the reconciliation network's chosen layout algorithm across
+// filter-triggered re-renders (which rebuild the network's DOM each time —
+// see renderFilteredExplorer), same reasoning as workingAssignmentInitialized
+// above. Reset on every fresh assembly load.
+let networkAlgorithm = 'ring';
 
 // Phase 9 export: the loaded assembly's own File (re-sliced via
 // Blob.slice for per-MAG FASTA extraction, never re-uploaded) and its
@@ -164,7 +184,7 @@ function renderBinSummaryCard(records, binAssignments, toolLabel) {
  * overlap and renders the reconciled view — putative MAGs (side by side
  * across tools), and the ranked disputed-contig list.
  */
-function renderReconciliationCard(records, result) {
+function renderReconciliationCard(records, result, filteredIds) {
   const { computeCompletenessRedundancy, mimagTier } = window.ClannMAG.binSummary;
   const recordsById = new Map(records.map((r) => [r.id, r]));
   const tools = result.tools;
@@ -195,7 +215,8 @@ function renderReconciliationCard(records, result) {
     .join('');
 
   const DISPUTED_ROW_LIMIT = 200;
-  const disputedRows = result.disputedContigsRanked
+  const disputedInFilter = result.disputedContigsRanked.filter((c) => filteredIds.has(c.contigId));
+  const disputedRows = disputedInFilter
     .slice(0, DISPUTED_ROW_LIMIT)
     .map((c) => {
       const votesStr = tools.map((t) => `${t}: ${c.votes[t] ?? '<span class="hint">unbinned</span>'}`).join(' &middot; ');
@@ -226,8 +247,16 @@ function renderReconciliationCard(records, result) {
           <tbody>${magRows}</tbody>
         </table>
       </div>
+      <h4>Contig-level agreement network</h4>
+      <div class="row"><label>Arrange</label><select id="networkAlgorithm">
+        <option value="ring">Ring</option>
+        <option value="petal">Petal (grouped by MAG)</option>
+        <option value="force">Force-directed</option>
+      </select></div>
+      <div class="row-count" id="reconciliationNetworkNote"></div>
+      <div id="reconciliationNetwork"></div>
       <h4>Disputed contigs, most split first</h4>
-      <div class="row-count">${result.disputedContigsRanked.length.toLocaleString()} contigs where loaded tools disagree${result.disputedContigsRanked.length > DISPUTED_ROW_LIMIT ? `, showing the first ${DISPUTED_ROW_LIMIT}` : ''}</div>
+      <div class="row-count">${disputedInFilter.length.toLocaleString()} of ${result.disputedContigsRanked.length.toLocaleString()} contigs where loaded tools disagree match the current filters${disputedInFilter.length > DISPUTED_ROW_LIMIT ? `, showing the first ${DISPUTED_ROW_LIMIT}` : ''}</div>
       <div class="table-wrap scroll-panel">
         <table class="data-table">
           <thead><tr><th>Contig</th><th>Agreement</th><th>Tools voting</th><th>Votes by tool</th></tr></thead>
@@ -236,6 +265,68 @@ function renderReconciliationCard(records, result) {
       </div>
     </div>
   `;
+}
+
+/**
+ * Renders the hub-and-leaf network into the placeholder left by
+ * renderReconciliationCard, above — split out because it needs a live DOM
+ * node (createReconciliationNetwork builds SVG into it), unlike the rest
+ * of that card which is a plain innerHTML string. Scoped to disputed
+ * contigs only (brief's "disputed set", and result.disputedContigsRanked
+ * is already restricted to contigs with 2+ distinct tool votes and
+ * agreementFraction<1 — see bin-reconciliation.js), since a hub-and-leaf
+ * edge per contig per voting tool would be an unreadable hairball if it
+ * also had to include every unanimous core contig. Respects the current
+ * filters like every other section (`filteredIds`). The chosen layout
+ * algorithm (`networkAlgorithm`, module-level) persists across filter
+ * changes and manual node drags are discarded on re-layout — switching
+ * algorithm is "start over with a different arrangement", not a blend.
+ */
+function initReconciliationNetwork(result, filteredIds) {
+  const { createReconciliationNetwork } = window.ClannMAG.reconciliationNetwork;
+  const container = document.getElementById('reconciliationNetwork');
+  const note = document.getElementById('reconciliationNetworkNote');
+  const algorithmSelect = document.getElementById('networkAlgorithm');
+  if (!container || !note) return;
+
+  if (algorithmSelect) {
+    algorithmSelect.value = networkAlgorithm;
+    // Guarded so repeated calls from the change handler itself (see below)
+    // don't stack a fresh listener on the same <select> element each time.
+    if (!algorithmSelect.dataset.wired) {
+      algorithmSelect.dataset.wired = '1';
+      algorithmSelect.addEventListener('change', () => {
+        networkAlgorithm = algorithmSelect.value;
+        initReconciliationNetwork(result, filteredIds);
+      });
+    }
+  }
+
+  const NODE_LIMIT = 250;
+  const disputedInFilter = result.disputedContigsRanked.filter((c) => filteredIds.has(c.contigId));
+  const shown = disputedInFilter.slice(0, NODE_LIMIT);
+
+  const hubIdsSet = new Set();
+  const leaves = shown.map((c) => {
+    const hubIds = [...new Set(Object.values(c.votes).filter(Boolean))];
+    hubIds.forEach((h) => hubIdsSet.add(h));
+    return { id: c.contigId, hubIds };
+  });
+  const edges = [];
+  for (const c of shown) {
+    for (const [tool, magId] of Object.entries(c.votes)) {
+      if (magId) edges.push({ leafId: c.contigId, hubId: magId, tool });
+    }
+  }
+  const hubs = [...hubIdsSet].map((id) => ({ id, label: id }));
+
+  note.textContent = disputedInFilter.length === 0
+    ? 'No disputed contigs match the current filters.'
+    : `${shown.length.toLocaleString()} of ${disputedInFilter.length.toLocaleString()} disputed contig(s) shown as leaves around their voted MAG hubs` +
+      (disputedInFilter.length > NODE_LIMIT ? ` (limited to ${NODE_LIMIT} for readability — narrow with filters to see the rest)` : '') +
+      ' · one coloured line per tool that voted that contig into that MAG · hover a contig or MAG to trace its edges.';
+
+  createReconciliationNetwork(container, { hubs, leaves, edges }, { width: 680, height: 680, algorithm: networkAlgorithm });
 }
 
 /**
@@ -256,7 +347,10 @@ function initInteractiveSection(records, binTablesByTool, reconciliationResult) 
   const { computeBinSummaries } = window.ClannMAG.binSummary;
   const { createScatterPlot } = window.ClannMAG.scatter;
 
-  workingAssignment = deriveInitialAssignment(binTablesByTool, reconciliationResult);
+  if (!workingAssignmentInitialized) {
+    workingAssignment = deriveInitialAssignment(binTablesByTool, reconciliationResult);
+    workingAssignmentInitialized = true;
+  }
 
   const AXES = {
     gcContent: { label: 'GC%', get: (r) => r.gcContent * 100 },
@@ -276,7 +370,7 @@ function initInteractiveSection(records, binTablesByTool, reconciliationResult) 
   const card = document.getElementById('interactive-card');
   card.innerHTML = `
     <h3>Refine bins (interactive)</h3>
-    <div class="row-count">Drag on the plot to select a cluster of contigs (a simplified rectangular lasso), then move them to a bin below. Reassignments recalculate bin stats immediately; export of the revised assignment table is a later phase.</div>
+    <div class="row-count">Drag on the plot to select a cluster of contigs (a simplified rectangular lasso), then move them to a bin below. Reassignments recalculate bin stats immediately. Shows every contig regardless of the left-pane filters, since reassignment acts on the full session, not a filtered view of it.</div>
     <div class="row"><label>X axis</label><select id="scatterX">${axisOptionsHtml('gcContent')}</select></div>
     <div class="row"><label>Y axis</label><select id="scatterY">${axisOptionsHtml('length')}</select></div>
     <div id="scatterContainer"></div>
@@ -571,9 +665,101 @@ function initExportSection() {
   });
 }
 
-async function renderContigTable(records, binTablesByTool) {
-  currentRecords = records;
-  const sorted = [...records].sort((a, b) => b.length - a.length);
+/**
+ * Renders the left-pane filters UI (brief §Left pane: filters and search)
+ * into #filtersSectionBody, against whatever's in `latest`. Rebuilt
+ * wholesale on every fresh load (bin options depend on which tools were
+ * loaded), not on every filter change — inputs keep their own DOM state
+ * between keystrokes, `currentFilters` is only read from them on change.
+ */
+function renderFiltersSection() {
+  const { listBinFilterOptions } = window.ClannMAG.filters;
+  const body = document.getElementById('filtersSectionBody');
+  const binOptions = listBinFilterOptions(latest.binIndex);
+
+  body.innerHTML = `
+    <div class="row"><label>Search</label><input type="text" id="filterSearch" placeholder="contig or bin ID"></div>
+    <div class="row"><label>Length ≥ bp</label><input type="number" id="filterLengthMin" min="0"></div>
+    <div class="row"><label>Length ≤ bp</label><input type="number" id="filterLengthMax" min="0"></div>
+    <div class="row"><label>GC% ≥</label><input type="number" id="filterGcMin" min="0" max="100"></div>
+    <div class="row"><label>GC% ≤</label><input type="number" id="filterGcMax" min="0" max="100"></div>
+    <div class="row"><label>Coding density% ≥</label><input type="number" id="filterCdMin" min="0" max="100"></div>
+    <div class="row"><label>Coding density% ≤</label><input type="number" id="filterCdMax" min="0" max="100"></div>
+    ${binOptions.length > 0 ? `
+    <div class="row"><label>Bin</label><select id="filterBin">
+      <option value="">Any</option>
+      <option value="__unbinned__">Unbinned (all tools)</option>
+      ${binOptions.map((o) => `<option value="${o.value}">${o.label}</option>`).join('')}
+    </select></div>` : ''}
+    ${latest.reconciliationResult ? `
+    <div class="row"><label title="Show only contigs where the loaded tools agree on the assigned MAG in at most this fraction of votes">Max agreement %</label>
+      <input type="number" id="filterMaxAgreement" min="0" max="100" placeholder="100"></div>` : ''}
+    <div class="row"><button class="act" id="filterResetBtn" type="button">Reset filters</button></div>
+    <div class="hint" id="filterSummary"></div>
+  `;
+
+  function readFiltersFromInputs() {
+    const num = (id) => {
+      const el = document.getElementById(id);
+      if (!el || el.value === '') return null;
+      const v = Number(el.value);
+      return Number.isNaN(v) ? null : v;
+    };
+    currentFilters = {
+      lengthMin: num('filterLengthMin'), lengthMax: num('filterLengthMax'),
+      gcMin: num('filterGcMin'), gcMax: num('filterGcMax'),
+      codingDensityMin: num('filterCdMin'), codingDensityMax: num('filterCdMax'),
+      binFilter: document.getElementById('filterBin')?.value || '',
+      maxAgreementPercent: num('filterMaxAgreement'),
+      searchText: document.getElementById('filterSearch')?.value || '',
+    };
+    renderFilteredExplorer();
+  }
+
+  // Debounced so typing in the search box (or a number field) doesn't
+  // re-render every keystroke — the debounce is short enough to still
+  // feel live.
+  let debounceHandle = null;
+  const onInput = () => {
+    clearTimeout(debounceHandle);
+    debounceHandle = setTimeout(readFiltersFromInputs, 150);
+  };
+  body.querySelectorAll('input').forEach((el) => el.addEventListener('input', onInput));
+  body.querySelectorAll('select').forEach((el) => el.addEventListener('change', readFiltersFromInputs));
+  document.getElementById('filterResetBtn').addEventListener('click', () => {
+    currentFilters = window.ClannMAG.filters.defaultFilters();
+    renderFiltersSection();
+    renderFilteredExplorer();
+  });
+}
+
+/**
+ * Builds the right-pane analysis sections from `latest` (everything
+ * filter-independent, computed once per load) restricted to whatever
+ * currently passes `currentFilters` — the tables and the reconciliation
+ * network only ever show the filtered subset (brief's left-pane-filters/
+ * right-pane-view split). Re-run on every filter change; cheap enough
+ * (array filter + string templating over records already in memory, no
+ * re-parsing or re-searching) to do synchronously on each keystroke's
+ * debounced callback.
+ *
+ * Scope: filtering covers the read-only analysis views (per-contig table,
+ * bin summaries, reconciliation, outlier flagging). The interactive
+ * refine/QC/export sections below keep operating on the full working
+ * assignment regardless of filters — reassigning or exporting a contig
+ * that's merely hidden by a filter would be surprising, so those sections
+ * are session state, not a filtered view of it.
+ */
+function renderFilteredExplorer() {
+  const { records, binTablesByTool, tools, reconciliationResult, outlierFlags, outlierMeta, binIndex, agreementByContigId } = latest;
+  const { applyFilters } = window.ClannMAG.filters;
+  const filteredRecords = applyFilters(records, currentFilters, { binIndex, agreementByContigId });
+  const filteredIds = new Set(filteredRecords.map((r) => r.id));
+
+  document.getElementById('filterSummary').textContent =
+    `${filteredRecords.length.toLocaleString()} of ${records.length.toLocaleString()} contigs match the current filters.`;
+
+  const sorted = [...filteredRecords].sort((a, b) => b.length - a.length);
   const totalLength = sorted.reduce((sum, r) => sum + r.length, 0);
   const n50 = computeN50(sorted.map((r) => r.length), totalLength);
   const meanGc = sorted.length ? sorted.reduce((sum, r) => sum + r.gcContent, 0) / sorted.length : 0;
@@ -593,32 +779,21 @@ async function renderContigTable(records, binTablesByTool) {
     </tr>`)
     .join('');
 
-  const tools = binTablesByTool ? [...binTablesByTool.keys()] : [];
   const perToolBinCards = tools
-    .map((tool) => renderBinSummaryCard(records, binTablesByTool.get(tool), tools.length > 1 ? tool : null))
+    .map((tool) => {
+      const filteredAssignments = binTablesByTool.get(tool).filter((a) => filteredIds.has(a.contigId));
+      return renderBinSummaryCard(records, filteredAssignments, tools.length > 1 ? tool : null);
+    })
     .join('');
 
-  let reconciliationResult = null;
-  if (tools.length > 1) {
-    reconciliationResult = window.ClannMAG.binReconciliation.reconcileBins(binTablesByTool);
-  }
-  const reconciliationCard = reconciliationResult ? renderReconciliationCard(records, reconciliationResult) : '';
+  const reconciliationCard = reconciliationResult ? renderReconciliationCard(records, reconciliationResult, filteredIds) : '';
 
-  let outlierCard = '';
-  if (tools.length > 0) {
-    const tree = await getTaxonomyTree();
-    const flags = computeOutlierFlags(records, binTablesByTool, reconciliationResult, tree);
-    outlierCard = renderOutlierCard(flags, {
-      hasCoverage: records.some((r) => r.coverageDepths),
-      hasTaxonomy: tree !== null,
-      hasKraken: records.some((r) => r.krakenTaxId != null),
-      hasCrossTool: reconciliationResult !== null,
-    });
-  }
+  const filteredOutlierFlags = outlierFlags.filter((f) => filteredIds.has(f.contigId));
+  const outlierCard = tools.length > 0 ? renderOutlierCard(filteredOutlierFlags, outlierMeta) : '';
 
   explorer.innerHTML = `
     <div class="card">
-      <h3>Assembly summary</h3>
+      <h3>Assembly summary${records.length !== filteredRecords.length ? ' (filtered)' : ''}</h3>
       <div class="row"><label>Contigs</label><strong>${sorted.length.toLocaleString()}</strong></div>
       <div class="row"><label>Total length</label><strong>${totalLength.toLocaleString()} bp</strong></div>
       <div class="row"><label>N50</label><strong>${n50.toLocaleString()} bp</strong></div>
@@ -634,7 +809,7 @@ async function renderContigTable(records, binTablesByTool) {
     ${perToolBinCards}
     <div class="card">
       <h3>Per-contig properties</h3>
-      <div class="row-count">${sorted.length.toLocaleString()} contigs, longest first</div>
+      <div class="row-count">${sorted.length.toLocaleString()} of ${records.length.toLocaleString()} contigs match the current filters, longest first</div>
       <div class="table-wrap scroll-panel">
         <table class="data-table">
           <thead><tr><th>Contig</th><th>Length</th><th>GC%</th><th>GC skew</th><th>Coding density</th><th>Marker genes</th><th title="Non-uniform FASTA line wrapping">⚠</th></tr></thead>
@@ -643,12 +818,58 @@ async function renderContigTable(records, binTablesByTool) {
       </div>
     </div>
   `;
-  document.getElementById('empty').style.display = 'none';
-  explorer.style.display = 'flex';
 
+  if (reconciliationResult) initReconciliationNetwork(reconciliationResult, filteredIds);
   if (tools.length > 0) initInteractiveSection(records, binTablesByTool, reconciliationResult);
   if (reconciliationResult) initQcSection(records, reconciliationResult);
   if (tools.length > 0) initExportSection();
+}
+
+/**
+ * Compute-once entry point for a freshly loaded assembly (+ any bin/
+ * coverage/Kraken tables): builds everything filtering must NOT redo —
+ * cross-tool reconciliation, the combined outlier/disagreement flags
+ * (marker-gene taxonomy fetch included), and the bin-index/agreement
+ * lookups filters.js needs — stores it all in `latest`, then hands off to
+ * renderFiltersSection/renderFilteredExplorer for the actual DOM build.
+ */
+async function renderContigTable(records, binTablesByTool) {
+  currentRecords = records;
+  const tools = binTablesByTool ? [...binTablesByTool.keys()] : [];
+
+  let reconciliationResult = null;
+  if (tools.length > 1) {
+    reconciliationResult = window.ClannMAG.binReconciliation.reconcileBins(binTablesByTool);
+  }
+
+  let outlierFlags = [];
+  let outlierMeta = { hasCoverage: false, hasTaxonomy: false, hasKraken: false, hasCrossTool: false };
+  if (tools.length > 0) {
+    const tree = await getTaxonomyTree();
+    outlierFlags = computeOutlierFlags(records, binTablesByTool, reconciliationResult, tree);
+    outlierMeta = {
+      hasCoverage: records.some((r) => r.coverageDepths),
+      hasTaxonomy: tree !== null,
+      hasKraken: records.some((r) => r.krakenTaxId != null),
+      hasCrossTool: reconciliationResult !== null,
+    };
+  }
+
+  const { buildBinIndex, defaultFilters } = window.ClannMAG.filters;
+  const binIndex = buildBinIndex(binTablesByTool);
+  const agreementByContigId = new Map();
+  if (reconciliationResult) {
+    for (const c of reconciliationResult.contigAgreement) agreementByContigId.set(c.contigId, c.agreementFraction);
+  }
+
+  latest = { records, binTablesByTool, tools, reconciliationResult, outlierFlags, outlierMeta, binIndex, agreementByContigId };
+  currentFilters = defaultFilters();
+
+  document.getElementById('empty').style.display = 'none';
+  document.getElementById('explorer').style.display = 'flex';
+
+  renderFiltersSection();
+  renderFilteredExplorer();
 }
 
 // Parsing runs in a Worker (src/workers/fasta-worker.js) rather than on the
@@ -743,6 +964,8 @@ function loadAssembly(file, binTablesByTool, coverageTable, krakenCalls) {
     setBusy(true);
     showError(`Parsing ${file.name}… 0 contigs so far`);
     currentAssemblyFile = file;
+    workingAssignmentInitialized = false;
+    networkAlgorithm = 'ring';
 
     worker.onmessage = async (e) => {
       const msg = e.data;

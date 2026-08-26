@@ -180,6 +180,15 @@ main > *, #wrap, #explorer, .card{min-width:0}
 .qc-comparison-row > div{flex:1 1 320px;min-width:280px}
 .empty-note{color:var(--muted);font-style:italic;padding:12px}
 
+/* ---- Cross-tool reconciliation bipartite network ---- */
+.network-wrap{margin-bottom:12px}
+.network-hub{fill:var(--panel);stroke:var(--ink);stroke-width:1.6}
+.network-hub-label{fill:var(--ink);font-size:10px;font-family:var(--font-mono)}
+.network-leaf{fill:var(--muted);stroke:var(--bg);stroke-width:0.6}
+.network-legend{display:flex;flex-wrap:wrap;gap:10px 14px;margin-top:6px;font-size:11.5px;color:var(--muted)}
+.network-legend-item{display:inline-flex;align-items:center;gap:5px}
+.network-swatch{width:9px;height:9px;border-radius:2px;display:inline-block}
+
 @media (max-width: 760px){
   main{flex-direction:column;overflow:auto}
   #side{width:100% !important;max-height:60vh;border-right:none;border-bottom:1px solid var(--line)}
