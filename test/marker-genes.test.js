@@ -1,7 +1,7 @@
 const { test, report, assert } = require('./harness');
 const {
   parseIndexBinary, parseRefSeqsBinary, buildKeyLookup, buildBloomFilter,
-  extendUngapped, searchContigForMarkers,
+  extendUngapped, extendGapped, searchContigForMarkers,
 } = require('../src/model/marker-genes');
 const { forEachReducedKmer } = require('../src/model/reduced-alphabet');
 const fixtures = require('./fixtures/marker-gene-sequences.json');
@@ -141,6 +141,40 @@ test('extendUngapped halts at a stop-codon sentinel without special-case logic',
   const residues = Uint8Array.from(Buffer.from(ref, 'ascii'));
   const result = extendUngapped(query, residues, 0, ref.length, 2, 2, 15);
   // Anchored inside the left block, extension should not cross the '*' at index 5
+  assert.ok(result.frameEnd < 5, `expected extension to stop before the sentinel, got frameEnd=${result.frameEnd}`);
+});
+
+// ---- extendGapped (prototype — see docs/scg-blast-verification.md
+// "Gapped extension (prototyped, not adopted)"; off by default in
+// searchContigForMarkers, reachable via {useGappedExtension: true}) ----
+
+test('extendGapped matches extendUngapped when gaps are effectively disabled', () => {
+  const seq = 'MSLKCGIVGLPNVGKSTLFNALTKAGIAAENYPFCTIEPNVGIVEV';
+  const residues = Uint8Array.from(Buffer.from(seq, 'ascii'));
+  const anchor = 20;
+  const ungapped = extendUngapped(seq, residues, 0, seq.length, anchor, anchor, 15);
+  const gapped = extendGapped(seq, residues, 0, seq.length, anchor, anchor, { xDrop: 15, gapPenalty: 1000, bandWidth: 8 });
+  assert.strictEqual(gapped.score, ungapped.score);
+  assert.strictEqual(gapped.alignedLength, ungapped.alignedLength);
+});
+
+test('extendGapped crosses a deletion that stops extendUngapped short', () => {
+  const ref = 'MSLKCGIVGLPNVGKSTLFNALTKAGIAAENYPFCTIEPNVGIVEVPDPRLAQLSEIVKPQKIQPAIVEFVDIAGLVAG';
+  const query = 'MSLKCGIVGLPNVGKSTLFNALTKAGIAAEN' + 'CTIEPNVGIVEVPDPRLAQLSEIVKPQKIQPAIVEFVDIAGLVAG'; // 'YPF' deleted
+  const residues = Uint8Array.from(Buffer.from(ref, 'ascii'));
+  const anchor = 15; // well before the deletion
+  const ungapped = extendUngapped(query, residues, 0, ref.length, anchor, anchor, 15);
+  const gapped = extendGapped(query, residues, 0, ref.length, anchor, anchor, { xDrop: 15, gapPenalty: 8, bandWidth: 10 });
+  assert.ok(gapped.alignedLength > ungapped.alignedLength, 'gapped extension should cover more of the reference than ungapped');
+  assert.strictEqual(gapped.alignedLength, ref.length, 'gapped extension should cross the deletion and reach the full reference length');
+  assert.ok(gapped.score > ungapped.score);
+});
+
+test('extendGapped halts at a stop-codon sentinel, same as extendUngapped', () => {
+  const query = 'AAAAA*BBBBB';
+  const ref =   'AAAAAXBBBBB';
+  const residues = Uint8Array.from(Buffer.from(ref, 'ascii'));
+  const result = extendGapped(query, residues, 0, ref.length, 2, 2, { xDrop: 15, gapPenalty: 8, bandWidth: 5 });
   assert.ok(result.frameEnd < 5, `expected extension to stop before the sentinel, got frameEnd=${result.frameEnd}`);
 });
 

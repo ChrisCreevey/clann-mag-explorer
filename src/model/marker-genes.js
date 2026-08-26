@@ -50,6 +50,16 @@ const DEFAULT_PARAMS = {
   // single-threaded lever).
   minSeedStride: 4,
   maxSeedsPerSegment: 150,
+  // Gapped-extension prototype (see extendGapped below and
+  // docs/scg-blast-verification.md "What's left") — off by default,
+  // production behavior is unchanged unless a caller opts in. gapPenalty
+  // and bandWidth are unvalidated starting points (a linear gap penalty
+  // roughly matching BLOSUM62's scale, and a band wide enough to catch a
+  // handful of small indels without either cost exploding or the search
+  // wandering too far off the seed diagonal), not calibrated numbers.
+  useGappedExtension: false,
+  gapPenalty: 8,
+  bandWidth: 16,
 };
 
 // ---- Binary asset parsing ----
@@ -245,6 +255,120 @@ function extendUngapped(frameStr, refResidues, refOffset, refLength, frameAnchor
   };
 }
 
+// ---- Gapped extension (prototype — see docs/scg-blast-verification.md
+// "What's left") ----
+//
+// extendUngapped can't cross an indel: the moment query and reference go
+// out of register, every subsequent residue pair looks like noise to
+// BLOSUM62, and X-drop halts immediately — regardless of how well the
+// alignment resumes a few residues later back in the correct frame. This
+// is a banded, X-drop-bounded dynamic-programming extension (the same
+// family of algorithm BLAST's own gapped-extension stage uses) that can
+// insert a gap to restore register and keep going. Deliberately a LINEAR
+// gap penalty for this prototype, not the affine (open+extend) model a
+// shipped version would want — simpler to get correct first, and enough
+// to test whether crossing indels recovers real recall before investing
+// in the fuller model.
+//
+// Banded: only reference offsets within `bandWidth` of the query offset
+// are considered at all, not a full O(query x reference) table — indels
+// in real, related sequences are usually small, and this is what keeps
+// the extra cost proportional to (extension length x band width) rather
+// than to the full reference length. Only ever invoked on (refSeqId,
+// diagonal) pairs that already cleared MIN_SEEDS_PER_DIAGONAL, i.e. a
+// tiny, pre-filtered slice of all candidates — same cost structure as
+// extendUngapped today, just a constant (band-width) factor more
+// expensive per call.
+
+/**
+ * One-directional banded gapped extension, X-drop bounded. `query`/`ref`
+ * are read forward from index 0 (caller reverses them for the leftward
+ * direction, matching extendUngapped's left/right split).
+ * @returns {{score:number, queryConsumed:number, refConsumed:number}}
+ *   the best-scoring prefix pair found, not necessarily consuming
+ *   everything available (X-drop/length bounds may cut it short)
+ */
+function extendGappedOneDirection(query, queryLen, ref, refLen, xDrop, gapPenalty, bandWidth) {
+  const width = bandWidth * 2 + 1;
+  const NEG_INF = -1e9;
+  let prevRow = new Float64Array(width).fill(NEG_INF);
+  let currRow = new Float64Array(width).fill(NEG_INF);
+  prevRow[bandWidth] = 0; // score[i=0][b=0] = 0 (no residues consumed yet)
+
+  let globalBest = 0, bestQueryConsumed = 0, bestRefConsumed = 0;
+  const maxI = queryLen; // i = query residues consumed so far
+
+  for (let i = 1; i <= maxI; i++) {
+    currRow.fill(NEG_INF);
+    let rowBest = NEG_INF;
+    for (let bi = 0; bi < width; bi++) {
+      const b = bi - bandWidth; // diagonal offset: j = i + b
+      const j = i + b;
+      if (j < 0 || j > refLen) continue;
+
+      let cell = NEG_INF;
+      if (j >= 1 && prevRow[bi] > NEG_INF) { // diagonal: consume query[i-1] and ref[j-1]
+        const sub = BLOSUM62_SCORE[query[i - 1] * 128 + ref[j - 1]];
+        const v = prevRow[bi] + sub;
+        if (v > cell) cell = v;
+      }
+      if (bi + 1 < width && prevRow[bi + 1] > NEG_INF) { // gap in reference: consume query[i-1] only (j unchanged)
+        const v = prevRow[bi + 1] - gapPenalty;
+        if (v > cell) cell = v;
+      }
+      if (bi - 1 >= 0 && j >= 1 && currRow[bi - 1] > NEG_INF) { // gap in query: consume ref[j-1] only (i unchanged)
+        const v = currRow[bi - 1] - gapPenalty;
+        if (v > cell) cell = v;
+      }
+
+      currRow[bi] = cell;
+      if (cell > rowBest) rowBest = cell;
+      if (cell > globalBest) { globalBest = cell; bestQueryConsumed = i; bestRefConsumed = j; }
+    }
+    if (rowBest < globalBest - xDrop) break; // X-drop: every live cell in this row is already a dead end
+    const tmp = prevRow; prevRow = currRow; currRow = tmp;
+  }
+
+  return { score: globalBest, queryConsumed: bestQueryConsumed, refConsumed: bestRefConsumed };
+}
+
+/**
+ * Gapped counterpart to extendUngapped, same signature/return shape (so
+ * callers can swap between them via params.useGappedExtension without
+ * further changes) — `alignedLength` here is the REFERENCE span consumed
+ * (frameEnd-frameStart+1 and refEnd-refStart+1 can now differ, since gaps
+ * let query/reference spans diverge; callers computing coverage against
+ * refLength want the reference span, so that's what's returned as
+ * alignedLength for drop-in compatibility with computeFamilyCandidates).
+ */
+function extendGapped(frameStr, refResidues, refOffset, refLength, frameAnchor, refAnchor, params) {
+  const { xDrop, gapPenalty, bandWidth } = params;
+  const anchorScore = BLOSUM62_SCORE[frameStr.charCodeAt(frameAnchor) * 128 + refResidues[refOffset + refAnchor]];
+
+  const rightQueryLen = frameStr.length - frameAnchor - 1;
+  const rightRefLen = refLength - refAnchor - 1;
+  const rightQuery = new Uint8Array(Math.max(0, rightQueryLen));
+  for (let i = 0; i < rightQueryLen; i++) rightQuery[i] = frameStr.charCodeAt(frameAnchor + 1 + i);
+  const rightRef = refResidues.subarray(refOffset + refAnchor + 1, refOffset + refAnchor + 1 + Math.max(0, rightRefLen));
+  const right = extendGappedOneDirection(rightQuery, rightQueryLen, rightRef, rightRefLen, xDrop, gapPenalty, bandWidth);
+
+  const leftQueryLen = frameAnchor;
+  const leftRefLen = refAnchor;
+  const leftQuery = new Uint8Array(Math.max(0, leftQueryLen));
+  for (let i = 0; i < leftQueryLen; i++) leftQuery[i] = frameStr.charCodeAt(frameAnchor - 1 - i); // reversed: index 0 = nearest anchor
+  const leftRef = new Uint8Array(Math.max(0, leftRefLen));
+  for (let i = 0; i < leftRefLen; i++) leftRef[i] = refResidues[refOffset + refAnchor - 1 - i];
+  const left = extendGappedOneDirection(leftQuery, leftQueryLen, leftRef, leftRefLen, xDrop, gapPenalty, bandWidth);
+
+  return {
+    score: anchorScore + right.score + left.score,
+    frameStart: frameAnchor - left.queryConsumed, frameEnd: frameAnchor + right.queryConsumed,
+    refStart: refAnchor - left.refConsumed, refEnd: refAnchor + right.refConsumed,
+    alignedLength: left.refConsumed + 1 + right.refConsumed, // reference span, for coverage — see doc comment above
+    queryAlignedLength: left.queryConsumed + 1 + right.queryConsumed,
+  };
+}
+
 // Minimum distinct seeds a (refSeqId, diagonal) must accumulate before
 // extension runs — BLAST's classic "two-hit" heuristic. Necessary in
 // practice, not just a nicety: measured directly, a single-hit trigger
@@ -316,9 +440,10 @@ function findOrCreateDiagSlot(diagKey) {
  * into `bestByRefSeqId` (refSeqId -> best-scoring extension seen across
  * all six frames so far).
  */
-function searchFrameAgainstIndex(frameStr, frameIdx, assets, xDrop, bestByRefSeqId, maxSeedsPerSegment, minSeedStride) {
+function searchFrameAgainstIndex(frameStr, frameIdx, assets, p, bestByRefSeqId) {
   const { k, sortedKeys, keyLookup, bloom, keyOffsets, hitRefSeqId, hitPosition } = assets.index;
   const { seqOffsets, residues } = assets.refSeqs;
+  const { xDrop, maxSeedsPerSegment, minSeedStride, useGappedExtension, gapPenalty, bandWidth } = p;
   diagTableEpochCounter = (diagTableEpochCounter + 1) >>> 0;
   if (diagTableEpochCounter === 0) diagTableEpochCounter = 1; // skip the sentinel value on the very unlikely 32-bit wraparound
 
@@ -340,7 +465,9 @@ function searchFrameAgainstIndex(frameStr, frameIdx, assets, xDrop, bestByRefSeq
 
       const refOffset = seqOffsets[refSeqId];
       const refLength = seqOffsets[refSeqId + 1] - refOffset;
-      const result = extendUngapped(frameStr, residues, refOffset, refLength, diagTableFramePos[slot], diagTableRefPos[slot], xDrop);
+      const result = useGappedExtension
+        ? extendGapped(frameStr, residues, refOffset, refLength, diagTableFramePos[slot], diagTableRefPos[slot], { xDrop, gapPenalty, bandWidth })
+        : extendUngapped(frameStr, residues, refOffset, refLength, diagTableFramePos[slot], diagTableRefPos[slot], xDrop);
 
       const prev = bestByRefSeqId.get(refSeqId);
       if (!prev || result.score > prev.score) {
@@ -391,7 +518,7 @@ function resolveParams(family, p) {
 function computeFamilyCandidates(sixFrameTranslations, assets, p) {
   const bestByRefSeqId = new Map();
   sixFrameTranslations.forEach((frameStr, frameIdx) => {
-    searchFrameAgainstIndex(frameStr, frameIdx, assets, p.xDrop, bestByRefSeqId, p.maxSeedsPerSegment, p.minSeedStride);
+    searchFrameAgainstIndex(frameStr, frameIdx, assets, p, bestByRefSeqId);
   });
 
   const { seqOffsets, familyIndex, taxId } = assets.refSeqs;
@@ -448,7 +575,8 @@ const exportsObj = {
   DEFAULT_PARAMS,
   parseIndexBinary, parseRefSeqsBinary, parseAssets, loadMarkerGeneAssets,
   buildKeyLookup, lookupPopulatedIndex, buildBloomFilter, bloomMaybeContains,
-  extendUngapped, searchFrameAgainstIndex, computeFamilyCandidates, resolveParams, searchContigForMarkers,
+  extendUngapped, extendGapped, extendGappedOneDirection,
+  searchFrameAgainstIndex, computeFamilyCandidates, resolveParams, searchContigForMarkers,
 };
 if (typeof module !== 'undefined' && module.exports) module.exports = exportsObj;
 if (typeof self !== 'undefined') {

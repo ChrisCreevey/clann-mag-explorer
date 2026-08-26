@@ -1,6 +1,8 @@
 # SCG marker-gene recall — BLAST-based external verification
 
-Status: investigation complete, two threshold changes shipped as a result (see "Changes shipped" below).
+Status: investigation complete, two threshold changes shipped (see "Changes shipped"). Two follow-up questions
+about closing the remaining gap were also investigated and **not adopted** — see "Gapped extension" and
+"Seed-count-only classification (no extension at all)" below.
 
 ## Why this is a different check from Phase 3's calibration
 
@@ -100,8 +102,82 @@ from 5.6% → 6.7%, family-level detection unchanged at 36/40.
 After both changes, the remaining gap is almost entirely the ungapped-extension/coverage interaction described
 above. Closing more of it would need a structural change — gapped extension, or a coverage threshold that
 scales with how much of the contig's own length is available rather than a flat fraction of the full reference
-protein — not another threshold nudge. Worth revisiting if recall becomes a priority again, but out of scope
-for this pass.
+protein — not another threshold nudge.
+
+Two structural alternatives were prototyped and tested against the same BLAST ground truth as follow-ups.
+Neither was adopted, but both are worth recording so the reasoning doesn't have to be redone.
+
+## Gapped extension (prototyped, not adopted)
+
+An indel between query and reference throws off `extendUngapped`'s register permanently — every residue after
+it compares against the wrong reference position, scores as noise, and X-drop halts immediately, no matter how
+well the alignment resumes a few residues later in the correct frame. `minCoverage` only controls how much of
+that truncated alignment is required, not the truncation itself.
+
+**Implemented** `extendGapped` in `src/model/marker-genes.js`: a banded, X-drop-bounded dynamic-programming
+extension with a linear gap penalty (deliberately linear rather than affine open+extend, for a first prototype),
+same left/right-from-anchor structure as `extendUngapped`. Wired in behind a `useGappedExtension` param,
+**off by default** — shipped behavior is unaffected unless a caller opts in. Sanity-checked two ways: with gaps
+effectively disabled (a very high gap penalty) it reproduces `extendUngapped`'s score exactly; on a synthetic
+3-residue deletion, ungapped extension covers 31% of the reference before stopping, gapped extension crosses it
+and covers 100%, tripling the score.
+
+**Re-verified against the same BLAST ground truth**, stacked on top of the shipped `minCoverage: 0.3`:
+
+| | Contigs called | Families | Recall (exact) | BLAST-unsupported | Search time (full assembly) |
+|---|---|---|---|---|---|
+| Ungapped (shipped) | 1,133 | 36 | 74.2% | 6.7% | 8.4s |
+| Gapped, bandWidth=16 | 1,172 | 37 ⚠ | 77.1% | 7.6% | 36.5s |
+| Gapped, bandWidth=4 (narrowest tested) | 1,165 | 37 ⚠ | 76.4% | — | 17.9s |
+
+A real, independent ~3-point recall gain — but two problems that ruled it out for now:
+
+- **The runtime floor doesn't move much with band width.** Even at the narrowest band tested (4, vs. the
+  default 16), search time was still ~2.1x the ungapped baseline for essentially the same recall. The overhead
+  is inherent to running a DP table instead of a linear walk, not something a band-width knob can tune away —
+  the realistic choice is "roughly 2-4x slower" vs. "don't," not a dial with a cheap end.
+- **A new spurious family appears at every band width tested** (COG0096 — not supported by BLAST at all), the
+  same failure shape as pushing `minCoverage` too low. Fixing it needs its own calibration pass (the gap penalty
+  is the suspect, not band width, since it persists even at the narrowest band) — on top of the fact that every
+  existing threshold (`minScore`/`minCoverage`/`minMargin`/`minRepresentatives`) was tuned against ungapped
+  score distributions and would need re-deriving for gapped ones before this could ship.
+
+Given this tool's explicit "lightweight browser visualizer, not production" framing (the same framing behind
+`minSeedStride`/`maxSeedsPerSegment`'s careful seed-volume budgeting elsewhere in `marker-genes.js`), a
+consistent 2-4x slowdown of the search stage for +3 points of recall, bundled with a new precision problem that
+would need its own calibration investment, wasn't judged worth pursuing further. The code stays in the module
+as a tested, off-by-default option — reachable via `{ useGappedExtension: true }` — in case that judgment
+changes later (a bigger runtime budget, or recall becoming a higher priority).
+
+## Seed-count-only classification (no extension at all)
+
+The opposite direction: what if extension were dropped entirely, and a family call was based purely on how many
+independent seeds land on a diagonal, with a higher count cutoff instead of a score/coverage bar? Extension is
+by far the most expensive per-candidate step, so this was worth checking even though the expectation going in
+was that it would trade precision away.
+
+Swept the raw seed-count cutoff (using the same seeding/bloom/diagonal-counting path production uses, just
+stopping before any `extendUngapped`/`extendGapped` call) against the same BLAST ground truth:
+
+| min seed count | Contigs called | Recall (exact) | BLAST-unsupported |
+|---|---|---|---|
+| 2 | 21,852 | 79.9% | 94.2% |
+| 4 | 12,670 | 79.4% | 90.0% |
+| 6 | 1,721 | 76.6% | 33.0% |
+| 10 | 1,274 | 74.5% | 11.9% |
+| 20 (highest tested) | 1,191 | 72.7% | 8.1% |
+| *shipped (extension-based)* | *1,133* | *74.2%* | *6.7%* |
+
+The expectation held, decisively. At any cutoff loose enough to be useful (≤4 seeds), 90%+ of calls are false
+positives — a raw seed count can't distinguish "several short exact matches that are part of one real
+homologous alignment" from "this particular short reduced-alphabet motif just happens to recur across many
+unrelated diagonals by chance." Extension is exactly the step that makes that distinction, since a coincidence
+can share a few scattered k-mers with something but can't fake a long run of good BLOSUM62-scored residue
+similarity between them. Even at the highest cutoff tested (20), the result is worse than the shipped approach
+on **both** recall (72.7% vs. 74.2%) and precision (8.1% vs. 6.7% unsupported) — there's no cutoff in this sweep
+that matches shipped recall while beating shipped precision. Extension isn't overhead that could be trimmed
+away for a faster classifier; it's the step doing the actual discrimination. Not pursued further — no code
+changed as a result of this check (a throwaway script, not added to the module).
 
 ## Relationship to Phase 3 calibration
 
