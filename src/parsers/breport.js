@@ -41,7 +41,9 @@ function parseBreportLine(line) {
  * TaxonomyTree for `contigId`. Returns summary stats for the contig.
  *
  * @param {string} text - full file contents
- * @param {import('../model/taxonomy-tree').TaxonomyTree} tree
+ * @param {object} tree - a shared taxonomy tree accumulator (previously
+ *   src/model/taxonomy-tree.js's TaxonomyTree, since removed along with
+ *   its only caller — see bin-summary.js's note on this module)
  * @param {string} contigId
  */
 function parseBreport(text, tree, contigId) {

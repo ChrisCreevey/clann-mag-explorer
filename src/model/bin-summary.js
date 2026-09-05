@@ -140,20 +140,22 @@ function computeMarkerContributions(binContigs) {
 }
 
 /**
- * Taxonomic-disagreement flag (brief §Outlier and disagreement flagging):
- * a contig whose Kraken2 call differs from the rest of its bin. Scope
- * decision: exact-taxID majority-vote mismatch, not lineage-aware (e.g.
- * two different species in the same genus would still count as a
- * "disagreement" here). A full lineage-aware version needs a taxonomy
- * tree covering whatever arbitrary taxIDs Kraken2's default database
- * calls — unlike the marker-gene provenance check (marker-taxonomy.js),
- * which only ever needs the ~5,000 taxa this app's own fixed 40-family
- * reference set touches, Kraken2 can call anything in NCBI's full
- * taxonomy. Shipping that whole tree is out of scope here; a real
- * lineage-aware upgrade is possible if a student also loads a full-run
- * .breport alongside the per-contig calls (breport.js already builds a
- * real taxonomy-tree.js from one, per the eDNA Explorer port) — noted as
- * a follow-up, not built now.
+ * Taxonomic-disagreement flag: a contig whose Kraken2 call differs from
+ * the rest of its bin. Scope decision: exact-taxID majority-vote
+ * mismatch, not lineage-aware (e.g. two different species in the same
+ * genus would still count as a "disagreement" here) — a full lineage-
+ * aware version would need a taxonomy tree covering whatever arbitrary
+ * taxIDs Kraken2's default database calls, out of scope here.
+ *
+ * Currently unused: this fed the Outlier & disagreement flagging card,
+ * removed since it didn't add to the contig-resolution workflow the app
+ * is now built around — along with it went marker-taxonomy.js and
+ * src/model/taxonomy-tree.js (the marker-gene provenance/LCA machinery),
+ * which had no other caller. Kraken2 input is still parsed and attached
+ * to records as `krakenTaxId` (kraken2-contigs.js, app.js's
+ * attachAuxiliaryData) but currently has no visible effect. Left in
+ * place as a working, tested building block rather than deleted, in
+ * case a Kraken2-based view returns in some other form.
  * @param {object[]} binContigs - per-contig records with an optional
  *   `krakenTaxId: number` (from kraken2-contigs.js)
  * @returns {Map<string, boolean>} contigId -> true if this contig's call

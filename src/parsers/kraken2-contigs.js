@@ -12,11 +12,13 @@
 // actually carries a per-query taxonomic call is Kraken2's other, simpler
 // standard output format (`--output`, distinct from `--report`): one row
 // per query, `C|U <TAB> seq_id <TAB> taxid[ (name)] <TAB> length <TAB>
-// LCA mapping`. That's what this module parses. breport.js's *tree/LCA
-// machinery* (taxonomy-tree.js) is still reused for the taxonomic-
-// disagreement check itself, per the brief's actual intent — just fed
-// from this per-contig format instead of a breport, since only this one
-// carries a call per contig.
+// LCA mapping`. That's what this module parses. The per-contig calls it
+// produces (`{contigId, classified, taxId}[]`) are attached to records as
+// `krakenTaxId` (app.js's attachAuxiliaryData) — parsing and attachment
+// are still live, but the taxonomic-disagreement check that originally
+// consumed them (the removed Outlier & disagreement flagging card, and
+// with it breport.js's tree/LCA machinery, taxonomy-tree.js) is not; a
+// loaded Kraken2 file currently has no visible effect in the app.
 
 const TAXID_IN_NAME_RE = /\(taxid (\d+)\)/; // --use-names format: "Escherichia coli (taxid 562)"
 

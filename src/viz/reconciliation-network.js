@@ -89,6 +89,27 @@ function createReconciliationNetwork(container, data, options = {}) {
     .map((t) => `<span class="network-legend-item"><span class="network-swatch" style="background:hsl(${hueByTool.get(t)},60%,50%)"></span>${t}</span>`)
     .join('');
   wrap.appendChild(legend);
+
+  // Contig colour key — every leaf state gets its own swatch here so the
+  // network's colours are legible at a glance, not just via a per-node
+  // hover tooltip. Colours must track the .network-leaf-* CSS classes
+  // exactly (styles/main.css), so these are CSS custom-property
+  // references, not hardcoded hex, to stay theme-aware (light/dark) the
+  // same way those classes already are.
+  const stateLegend = document.createElement('div');
+  stateLegend.className = 'network-legend network-legend-states';
+  const STATE_SWATCHES = [
+    { state: 'core', label: 'Undisputed', color: 'var(--muted)' },
+    { state: 'tied', label: 'Unresolved (tied)', color: 'var(--amber-500)' },
+    { state: 'held-here', label: 'Held here', color: 'var(--moss-500)' },
+    { state: 'held-elsewhere', label: 'Held elsewhere', color: 'var(--clay-500)' },
+    { state: 'excluded', label: 'Excluded', color: 'var(--line)' },
+  ];
+  stateLegend.innerHTML = `<span class="hint">Contig colour:</span>` + STATE_SWATCHES
+    .map((s) => `<span class="network-legend-item"><span class="network-swatch" style="background:${s.color}"></span>${s.label}</span>`)
+    .join('');
+  wrap.appendChild(stateLegend);
+
   container.appendChild(wrap);
 
   const { hubPositions, leafPositions } = layoutNetwork(algorithm, hubs.map((h) => h.id), leaves, { width, height, centralHubId: options.centralHubId });

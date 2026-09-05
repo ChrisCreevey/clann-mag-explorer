@@ -88,9 +88,8 @@ let currentMagFilters = null;
 
 // Global thresholds/parameters a student can adjust to see how sensitive
 // the tool's derived calls are to where these lines are drawn: MIMAG
-// quality-tier cutoffs (bin-summary.js), the cross-tool bin-matching
-// overlap threshold (bin-reconciliation.js's minJaccard), and the outlier
-// flagging thresholds (outliers.js's computeFlagCount). Everything
+// quality-tier cutoffs (bin-summary.js) and the cross-tool bin-matching
+// overlap threshold (bin-reconciliation.js's minJaccard). Everything
 // here is cheap, pure-JS recomputation over already-parsed data — no
 // worker/marker-search re-run — except minJaccard, which changes bin
 // matching itself and so triggers a full recompute (recomputeLatest) at
@@ -101,7 +100,6 @@ function defaultGlobalParams() {
   return {
     mimag: { ...window.ClannMAG.binSummary.DEFAULT_MIMAG_THRESHOLDS },
     minJaccard: 0.1,
-    outlier: { ...window.ClannMAG.outliers.DEFAULT_OUTLIER_PARAMS },
     // Recall-adjustment for completeness/redundancy (docs/scg-blast-
     // verification.md) — see bin-summary.js's DEFAULT_ESTIMATED_RECALL
     // for why this correction exists at all: the built-in marker search
@@ -152,6 +150,18 @@ let networkAlgorithm = 'ring';
 // docs/phase1-investigation.md Phase 1), so there's nothing to persist.
 let currentAssemblyFile = null;
 let currentRecords = [];
+
+// Lazily-populated, session-scoped cache of the fully decompressed
+// assembly bytes — only ever needed when the source was gzipped (a
+// `.fai`-style byte span is in the *decompressed* stream, same
+// documented limitation extractBinFasta already works around). Clicking
+// contigs in the network to inspect their sequence (renderContigEvidence
+// -> loadContigSequenceSection) is a much more frequent action than the
+// one-off "export a bin's FASTA" case extractBinFasta was written for, so
+// decompressing fresh on every click would be wasteful for a large gzip
+// source — this makes that a one-time cost per session instead. Reset on
+// every fresh load.
+let decompressedAssemblyBytesCache = null;
 
 // Broader than the brief's original design (docs/clann-mag-explorer-brief.md
 // §Unsaved-work protection, which armed this only after the first contig
@@ -781,6 +791,7 @@ function renderContigEvidence(contigId, result, records) {
         <button class="act warn" id="evidenceExcludeBtn" type="button">${currentDecision === EXCLUDED_BIN_ID ? 'Excluded ✓' : 'Exclude from both/all'}</button>
       </div>
     </div>
+    <div class="card evidence-card" id="contigSequenceCard"><div class="hint">Loading sequence…</div></div>
   `;
 
   container.querySelectorAll('.evidence-assign-btn').forEach((btn) => {
@@ -796,6 +807,80 @@ function renderContigEvidence(contigId, result, records) {
       renderFilteredExplorer();
     });
   }
+
+  initContigSequenceSection(contigId);
+}
+
+/**
+ * Fills in the evidence panel's Sequence card, below the candidate-MAG
+ * table: the contig's own raw sequence (extractContigSequence), a copy-
+ * to-clipboard button, and a "Send to NCBI BLAST" button. Async and
+ * separate from the rest of renderContigEvidence (which is synchronous
+ * and returns immediately) so the candidate-MAG evidence — the thing a
+ * decision actually depends on — never waits on a Blob read/decompress.
+ * Guards against the student having already clicked a *different* contig
+ * (or the whole panel having been rebuilt) before this resolves — a race
+ * that's easy to hit since sequence loading is the slowest thing in this
+ * panel, especially on a first click against a gzipped assembly.
+ *
+ * Sending to BLAST copies the FASTA text to the clipboard and opens
+ * NCBI's standard nucleotide BLAST page in a new tab, rather than trying
+ * to pre-fill the query via a URL parameter: a contig can run to hundreds
+ * of thousands of bp, far past what any browser/server reliably accepts
+ * in a URL, and NCBI's BLAST form is a normal paste-in text box, not a
+ * documented GET-prefillable one — copy-then-paste is slower by one step
+ * but works for a sequence of any length and doesn't depend on guessing
+ * at unofficial URL parameters.
+ */
+async function initContigSequenceSection(contigId) {
+  const container = document.getElementById('contigSequenceCard');
+  if (!container) return;
+
+  const result = await extractContigSequence(contigId);
+  if (selectedContigId !== contigId) return; // student already moved on to a different contig
+  const freshContainer = document.getElementById('contigSequenceCard');
+  if (!freshContainer) return; // panel was rebuilt/closed while this was loading
+
+  if (!result) {
+    freshContainer.innerHTML = '<div class="hint">Sequence unavailable — this contig is not in the currently loaded assembly.</div>';
+    return;
+  }
+  const { record, sequence } = result;
+  if (sequence === null) {
+    freshContainer.innerHTML = '<div class="hint">Sequence not available for this contig (non-uniform FASTA line wrapping — the same limitation the per-MAG FASTA export has).</div>';
+    return;
+  }
+
+  const fasta = `>${record.header}\n${wrapSequence(sequence)}\n`;
+  freshContainer.innerHTML = `
+    <h4>Sequence</h4>
+    <div class="row-count">${sequence.length.toLocaleString()} bp</div>
+    <div class="table-wrap scroll-panel" style="max-height:220px"><pre class="contig-sequence">${wrapSequence(sequence)}</pre></div>
+    <div class="row" style="margin-top:8px">
+      <button class="act" id="copySequenceBtn" type="button">Copy sequence (FASTA)</button>
+      <button class="act" id="blastSequenceBtn" type="button">Send to NCBI BLAST (blastn) &#8599;</button>
+    </div>
+    <div class="row-count" id="sequenceActionNote"></div>
+  `;
+
+  const note = document.getElementById('sequenceActionNote');
+  document.getElementById('copySequenceBtn').addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(fasta);
+      note.textContent = 'Copied to clipboard.';
+    } catch {
+      note.textContent = 'Could not copy automatically — select the sequence above and copy it manually.';
+    }
+  });
+  document.getElementById('blastSequenceBtn').addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(fasta);
+      note.textContent = 'Sequence copied — paste it (Ctrl/Cmd+V) into the BLAST search box that just opened, then click BLAST.';
+    } catch {
+      note.textContent = 'Could not copy automatically — copy the sequence above manually and paste it into the BLAST search box that just opened.';
+    }
+    window.open('https://blast.ncbi.nlm.nih.gov/Blast.cgi?PROGRAM=blastn&PAGE_TYPE=BlastSearch&LINK_LOC=blasthome', '_blank', 'noopener');
+  });
 }
 
 /**
@@ -829,13 +914,69 @@ function triggerDownload(blob, filename) {
 }
 
 /**
+ * The full assembly, decompressed once and cached for the rest of the
+ * session (decompressedAssemblyBytesCache) — a gzip source's `.fai`-style
+ * byte offsets are in the *decompressed* stream (Phase 1's documented
+ * limitation), so any single-contig or multi-contig slice against a
+ * gzipped assembly needs this first. Only ever called when actually
+ * needed (a non-gzip source never touches this).
+ */
+async function getDecompressedAssemblyBytes() {
+  if (!decompressedAssemblyBytesCache) {
+    const stream = currentAssemblyFile.stream().pipeThrough(new DecompressionStream('gzip'));
+    decompressedAssemblyBytesCache = new Uint8Array(await new Response(stream).arrayBuffer());
+  }
+  return decompressedAssemblyBytesCache;
+}
+
+/** Slices one span's raw bytes out of the original assembly File, decompressing first if the source is gzipped. */
+async function sliceAssemblyBytes(offset, byteLength) {
+  if (currentRecords.some((r) => r.faiEntry.sourceCompressed)) {
+    const bytes = await getDecompressedAssemblyBytes();
+    return bytes.slice(offset, offset + byteLength);
+  }
+  return new Uint8Array(await currentAssemblyFile.slice(offset, offset + byteLength).arrayBuffer());
+}
+
+/** Wraps a bare sequence string at a fixed line width — standard FASTA convention, independent of however the source file happened to wrap it. */
+function wrapSequence(sequence, width = 60) {
+  const lines = [];
+  for (let i = 0; i < sequence.length; i += width) lines.push(sequence.slice(i, i + width));
+  return lines.join('\n');
+}
+
+/**
+ * Single-contig sequence extraction for the evidence panel's Sequence
+ * section (renderContigEvidence/initContigSequenceSection) — same byte-
+ * span-against-the-original-File mechanism as extractBinFasta, just for
+ * one contig instead of a whole bin, and returning a plain string (with
+ * the source's own line-wrapping newlines stripped out, not reused —
+ * unlike extractBinFasta, which reuses the original bytes verbatim for a
+ * byte-identical export) rather than a Blob, since this is for on-screen
+ * display and clipboard/BLAST use, not a file download.
+ * @returns {Promise<{record:object, sequence:string}|{record:object, sequence:null}|null>}
+ *   sequence is null when the contig's FASTA wrapping wasn't uniform (see
+ *   fasta-extract.js's computeSequenceByteSpan — same documented
+ *   limitation as per-MAG export); the whole result is null if the
+ *   contig isn't in the currently loaded assembly at all.
+ */
+async function extractContigSequence(contigId) {
+  const record = currentRecords.find((r) => r.id === contigId);
+  if (!record) return null;
+  const { computeSequenceByteSpan } = window.ClannMAG.fastaExtract;
+  const span = computeSequenceByteSpan(record.faiEntry);
+  if (!span) return { record, sequence: null };
+  const bytes = await sliceAssemblyBytes(span.offset, span.byteLength);
+  const sequence = new TextDecoder().decode(bytes).replace(/\r?\n/g, '');
+  return { record, sequence };
+}
+
+/**
  * Slices a MAG/bin's contigs' raw sequence bytes straight out of the
  * original assembly File (brief §Export — "built via Blob.slice against
  * the first-pass index rather than a second full file read") and
  * reassembles them under their original headers into one multi-FASTA
- * Blob. A gzip source needs one full decompression pass first (Phase 1's
- * documented limitation: `.fai`-style offsets are in the *decompressed*
- * stream) — done at most once per export, not per contig.
+ * Blob.
  * @returns {Promise<{blob: Blob, skippedContigIds: string[]}>}
  */
 async function extractBinFasta(binId, contigIds) {
@@ -843,23 +984,10 @@ async function extractBinFasta(binId, contigIds) {
   const plan = planFastaExtraction(currentRecords, new Map([[binId, contigIds]]));
   const { entries, skippedContigIds } = plan.get(binId);
 
-  const needsDecompression = entries.some((e) => {
-    const record = currentRecords.find((r) => r.id === e.id);
-    return record && record.faiEntry.sourceCompressed;
-  });
-  let decompressedBytes = null;
-  if (needsDecompression) {
-    const stream = currentAssemblyFile.stream().pipeThrough(new DecompressionStream('gzip'));
-    decompressedBytes = new Uint8Array(await new Response(stream).arrayBuffer());
-  }
-
   const parts = [];
   for (const entry of entries) {
     parts.push(`>${entry.header}\n`);
-    const { offset, byteLength } = entry.span;
-    const seqBytes = decompressedBytes
-      ? decompressedBytes.slice(offset, offset + byteLength)
-      : new Uint8Array(await currentAssemblyFile.slice(offset, offset + byteLength).arrayBuffer());
+    const seqBytes = await sliceAssemblyBytes(entry.span.offset, entry.span.byteLength);
     parts.push(seqBytes);
     if (seqBytes.length === 0 || seqBytes[seqBytes.length - 1] !== 10) parts.push('\n');
   }
@@ -1186,8 +1314,6 @@ function renderParamsSection() {
     <div class="row"><label>MIMAG Medium: completeness ≥</label><input type="number" id="paramMimagMedComp" min="0" max="100" value="${p.mimag.mediumMinCompleteness}"></div>
     <div class="row"><label>MIMAG Medium: contamination &lt;</label><input type="number" id="paramMimagMedCont" min="0" max="100" value="${p.mimag.mediumMaxContamination}"></div>
     <div class="row"><label title="Reciprocal-best-hit overlap required before two tools' bins are matched as the same putative MAG">Min bin-match Jaccard</label><input type="number" id="paramMinJaccard" min="0" max="1" step="0.01" value="${p.minJaccard}"></div>
-    <div class="row"><label title="Composition/coverage z-score above which a contig counts as an outlier flag">Outlier Z threshold</label><input type="number" id="paramZThreshold" min="0" step="0.1" value="${p.outlier.zThreshold}"></div>
-    <div class="row"><label title="Marker-gene taxonomic distance above which a contig counts as an outlier flag">Tax. distance threshold</label><input type="number" id="paramTaxDistance" min="0" step="1" value="${p.outlier.taxDistanceThreshold}"></div>
     <div class="row"><button class="act" id="paramResetBtn" type="button">Reset to defaults</button></div>
   `;
 
@@ -1207,10 +1333,6 @@ function renderParamsSection() {
         mediumMaxContamination: num('paramMimagMedCont', p.mimag.mediumMaxContamination),
       },
       minJaccard: num('paramMinJaccard', currentParams.minJaccard),
-      outlier: {
-        zThreshold: num('paramZThreshold', currentParams.outlier.zThreshold),
-        taxDistanceThreshold: num('paramTaxDistance', currentParams.outlier.taxDistanceThreshold),
-      },
       recallRate: Math.max(0.01, Math.min(1, num('paramRecallRate', currentParams.recallRate))),
     };
     if (currentParams.minJaccard !== previousMinJaccard) {
@@ -1250,7 +1372,7 @@ function renderParamsSection() {
  * the redesign, is helping find a MAG to select.
  */
 function renderFilteredExplorer() {
-  const { records, tools, reconciliationResult, outlierFlags, outlierMeta, binIndex, agreementByContigId } = latest;
+  const { records, tools, reconciliationResult, binIndex, agreementByContigId } = latest;
   ensureWorkingAssignment();
 
   const { applyFilters } = window.ClannMAG.filters;
@@ -1296,10 +1418,6 @@ function renderFilteredExplorer() {
   const neighborhood = (reconciliationResult && selectedMagId)
     ? buildMagNeighborhood(selectedMagId, reconciliationResult, { showUncontendedContigs, showConnectedMagContigs, showResolvedDisputedContigs })
     : null;
-  const neighborhoodContigIds = neighborhood ? new Set(neighborhood.leaves.map((l) => l.id)) : null;
-  const rankedOutlierFlags = applyOutlierThresholds(outlierFlags, currentParams.outlier);
-  const scopedOutlierFlags = neighborhoodContigIds ? rankedOutlierFlags.filter((f) => neighborhoodContigIds.has(f.contigId)) : [];
-  const outlierCard = tools.length > 0 ? renderOutlierCard(scopedOutlierFlags, outlierMeta, selectedMagId) : '';
   const toolsCard = (allBinTablesByTool && allBinTablesByTool.size > 0) ? renderToolsCard() : '';
 
   explorer.innerHTML = `
@@ -1314,7 +1432,6 @@ function renderFilteredExplorer() {
     </div>
     ${toolsCard}
     ${reconciliationCard}
-    ${outlierCard}
     ${tools.length > 0 ? '<div class="card" id="export-card"></div>' : ''}
     <div class="card">
       <details id="allContigsDetails">
@@ -1355,19 +1472,6 @@ async function recomputeLatest(records, binTablesByTool) {
     reconciliationResult = window.ClannMAG.binReconciliation.reconcileBins(binTablesByTool, { minJaccard: currentParams.minJaccard });
   }
 
-  let outlierFlags = [];
-  let outlierMeta = { hasCoverage: false, hasTaxonomy: false, hasKraken: false, hasCrossTool: false };
-  if (tools.length > 0) {
-    const tree = await getTaxonomyTree();
-    outlierFlags = computeOutlierFlags(records, binTablesByTool, reconciliationResult, tree);
-    outlierMeta = {
-      hasCoverage: records.some((r) => r.coverageDepths),
-      hasTaxonomy: tree !== null,
-      hasKraken: records.some((r) => r.krakenTaxId != null),
-      hasCrossTool: reconciliationResult !== null,
-    };
-  }
-
   const { buildBinIndex } = window.ClannMAG.filters;
   const binIndex = buildBinIndex(binTablesByTool);
   const agreementByContigId = new Map();
@@ -1392,7 +1496,7 @@ async function recomputeLatest(records, binTablesByTool) {
   }
 
   latest = {
-    records, binTablesByTool, tools, reconciliationResult, outlierFlags, outlierMeta, binIndex,
+    records, binTablesByTool, tools, reconciliationResult, binIndex,
     agreementByContigId, contigAgreementEntryByContigId, contigIdsByMagId,
   };
 }
@@ -1515,6 +1619,7 @@ function loadAssembly(file, binTablesByTool, coverageTable, krakenCalls) {
     setBusy(true);
     showError(`Parsing ${file.name}… 0 contigs so far`);
     currentAssemblyFile = file;
+    decompressedAssemblyBytesCache = null;
     workingAssignmentInitialized = false;
     networkAlgorithm = 'ring';
     selectedMagId = null;
@@ -1600,176 +1705,6 @@ async function findAuxiliaryFiles(otherFiles) {
     }
   }
   return { binTablesByTool: binTablesByTool.size ? binTablesByTool : null, coverageTable, krakenCalls };
-}
-
-// Fetched once and cached: build/03-taxonomy.js's output, used for the
-// marker-gene taxonomic-consistency check (brief §Marker-gene
-// identification module). ~420KB, small enough to fetch lazily on first
-// use rather than upfront alongside the (much larger) marker search
-// assets, which the Worker already loads in parallel with file parsing.
-let taxonomyTreePromise = null;
-function getTaxonomyTree() {
-  if (!taxonomyTreePromise) {
-    taxonomyTreePromise = window.ClannMAG.markerTaxonomy.loadTaxonomyTree('data/').catch((err) => {
-      console.warn('marker-gene taxonomy tree failed to load:', err.message);
-      return null;
-    });
-  }
-  return taxonomyTreePromise;
-}
-
-/**
- * Combines every per-contig signal this app computes (brief §Outlier and
- * disagreement flagging: "overlaid with the cross-tool agreement signal
- * ... combined with the other signals") into one ranked list: composition/
- * coverage centroid distance (outliers.js), marker contribution
- * (unique/redundant, bin-summary.js), marker-gene taxonomic consistency
- * (marker-taxonomy.js, if the lineage tree loaded), Kraken2 disagreement
- * (bin-summary.js, if a per-contig call file was loaded), and cross-tool
- * agreement (bin-reconciliation.js, if 2+ bin tables were loaded) — each
- * "hot" signal increments a contig's flagCount, the primary sort key.
- *
- * The contig grouping used as "the bin" for centroid/marker-contribution
- * purposes is the reconciled putative MAG's full contig set (core +
- * disputed) when 2+ tools are loaded, or the single table's own bins
- * otherwise — the best available guess at "this genome" either way.
- */
-function computeOutlierFlags(records, binTablesByTool, reconciliation, tree) {
-  const recordsById = new Map(records.map((r) => [r.id, r]));
-  const groups = [];
-
-  if (reconciliation) {
-    for (const mag of reconciliation.putativeMags) {
-      groups.push({ groupLabel: mag.magId, contigIds: [...mag.coreContigIds, ...mag.disputedContigIds] });
-    }
-  } else if (binTablesByTool) {
-    const [[, onlyTable]] = binTablesByTool;
-    const byBin = new Map();
-    for (const { contigId, binId } of onlyTable) {
-      if (!byBin.has(binId)) byBin.set(binId, []);
-      byBin.get(binId).push(contigId);
-    }
-    for (const [binId, contigIds] of byBin) groups.push({ groupLabel: binId, contigIds });
-  }
-
-  const { computeBinOutliers } = window.ClannMAG.outliers;
-  const { computeMarkerContributions, computeKrakenDisagreement } = window.ClannMAG.binSummary;
-  const { computeBinTaxonomicConsistency } = window.ClannMAG.markerTaxonomy;
-
-  const agreementByContig = new Map();
-  if (reconciliation) for (const c of reconciliation.contigAgreement) agreementByContig.set(c.contigId, c);
-
-  const flags = [];
-  for (const group of groups) {
-    const groupContigs = group.contigIds.map((id) => recordsById.get(id)).filter(Boolean);
-    if (groupContigs.length === 0) continue;
-
-    const zScores = computeBinOutliers(groupContigs);
-    const contributions = computeMarkerContributions(groupContigs);
-    const krakenFlags = computeKrakenDisagreement(groupContigs);
-    const taxConsistency = tree ? computeBinTaxonomicConsistency(groupContigs, tree) : null;
-
-    for (const contig of groupContigs) {
-      const z = zScores.get(contig.id);
-      const contribution = contributions.get(contig.id);
-      const taxDistance = (taxConsistency && taxConsistency.perContigDistance.get(contig.id)) ?? null;
-      const krakenDisagrees = krakenFlags.get(contig.id) || false;
-      const agreement = agreementByContig.get(contig.id) || null;
-
-      // flagCount isn't computed here — it depends on the adjustable
-      // z/taxonomic-distance thresholds (outliers.js's computeFlagCount),
-      // so it's derived at render time from these raw values instead
-      // (applyOutlierThresholds, below), letting a threshold change
-      // re-rank the list without redoing this per-contig analysis.
-      flags.push({
-        contigId: contig.id, groupLabel: group.groupLabel,
-        compositionZ: z.compositionZ, coverageZ: z.coverageZ, combinedZ: z.combinedZ,
-        uniqueCount: contribution.uniqueFamilies.length, redundantCount: contribution.redundantFamilies.length,
-        redundantOnly: contribution.redundantFamilies.length > 0 && contribution.uniqueFamilies.length === 0,
-        taxDistance, krakenDisagrees, agreementFraction: agreement ? agreement.agreementFraction : null,
-      });
-    }
-  }
-
-  return flags;
-}
-
-/**
- * Applies the current (adjustable) outlier-flagging thresholds to raw
- * per-contig signals (computeOutlierFlags's output) and re-sorts — split
- * out so a threshold change in the Thresholds & parameters panel can
- * re-rank the outlier table without recomputing composition/coverage
- * z-scores, marker contributions, or taxonomic consistency from scratch.
- */
-function applyOutlierThresholds(flags, outlierParams) {
-  const { computeFlagCount } = window.ClannMAG.outliers;
-  const withCounts = flags.map((f) => ({ ...f, flagCount: computeFlagCount(f, outlierParams) }));
-  withCounts.sort((a, b) => b.flagCount - a.flagCount || b.combinedZ - a.combinedZ);
-  return withCounts;
-}
-
-/**
- * Scoped, per the redesign, to whichever MAG is currently selected in the
- * picker table (the caller filters `flags` down to that MAG's network
- * neighborhood before calling this — see renderFilteredExplorer) rather
- * than showing every contig in the assembly at once.
- */
-function renderOutlierCard(flags, { hasCoverage, hasTaxonomy, hasKraken, hasCrossTool }, selectedMagId) {
-  if (!selectedMagId) {
-    return `
-      <div class="card">
-        <h3>Outlier &amp; disagreement flagging</h3>
-        <div class="hint">Select a putative MAG above to see outlier/disagreement flags for its contigs.</div>
-      </div>
-    `;
-  }
-  const ROW_LIMIT = 150;
-  const rows = flags
-    .slice(0, ROW_LIMIT)
-    .map((f) => `<tr>
-      <td>${f.contigId}</td>
-      <td>${f.groupLabel}</td>
-      <td class="num">${f.compositionZ.toFixed(2)}</td>
-      <td class="num">${f.coverageZ === null ? '<span class="hint">n/a</span>' : f.coverageZ.toFixed(2)}</td>
-      <td class="num">${f.uniqueCount}</td>
-      <td class="num">${f.redundantCount}</td>
-      <td class="num">${f.taxDistance === null ? '<span class="hint">n/a</span>' : f.taxDistance}</td>
-      <td>${f.krakenDisagrees ? '⚠' : ''}</td>
-      <td class="num">${f.agreementFraction === null ? '<span class="hint">n/a</span>' : `${(f.agreementFraction * 100).toFixed(0)}%`}</td>
-      <td class="num"><strong>${f.flagCount}</strong></td>
-    </tr>`)
-    .join('');
-
-  const notes = [
-    'composition Z is always available',
-    hasCoverage ? 'coverage Z from the loaded coverage table' : 'coverage Z: n/a, no coverage table loaded',
-    hasTaxonomy ? 'marker taxonomic distance from the loaded lineage table' : 'marker taxonomic distance: n/a, lineage table failed to load',
-    hasKraken ? 'Kraken2 disagreement from the loaded per-contig calls' : 'Kraken2 disagreement: n/a, no per-contig Kraken2 file loaded',
-    hasCrossTool ? 'cross-tool agreement from the reconciled bin tables' : 'cross-tool agreement: n/a, load 2+ bin tables to enable',
-  ];
-
-  return `
-    <div class="card">
-      <h3>Outlier &amp; disagreement flagging — ${selectedMagId}'s neighborhood</h3>
-      <div class="row-count">${flags.length.toLocaleString()} contigs scored${flags.length > ROW_LIMIT ? `, showing the top ${ROW_LIMIT} by flag count` : ''} &middot; ${notes.join(' &middot; ')}</div>
-      <div class="table-wrap scroll-panel">
-        <table class="data-table">
-          <thead><tr>
-            <th>Contig</th><th>Bin / MAG</th>
-            <th class="num" title="Standard deviations from this bin's composition centroid">Comp Z</th>
-            <th class="num" title="Standard deviations from this bin's coverage centroid">Cov Z</th>
-            <th class="num" title="Marker families found only on this contig within its bin">Unique</th>
-            <th class="num" title="Marker families also found elsewhere in this bin">Redundant</th>
-            <th class="num" title="How far this contig's marker provenance sits from the rest of its bin's consensus lineage">Tax dist.</th>
-            <th title="This contig's Kraken2 call disagrees with its bin's majority call">Kraken</th>
-            <th class="num" title="Cross-tool agreement fraction (Phase 5)">Agreement</th>
-            <th class="num" title="Count of signals flagged for this contig">Flags</th>
-          </tr></thead>
-          <tbody>${rows}</tbody>
-        </table>
-      </div>
-    </div>
-  `;
 }
 
 function renderContigMatchNotices(notices) {
