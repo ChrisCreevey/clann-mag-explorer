@@ -141,6 +141,20 @@ function filterActiveBinTables() {
 // above. Reset on every fresh assembly load.
 let networkAlgorithm = 'ring';
 
+// The MAG picker table's remembered sort ({colIndex, direction} | null) —
+// see initSortableTables/restoreMagTableSort. Reset on every fresh load.
+let magTableSortState = null;
+
+// MAGs the student has unticked in the picker table's Export column —
+// scoped deliberately narrowly to Export only, not the working
+// assignment/network/picker-table numbers: a MAG ticked off here (and
+// every contig currently assigned to it) is left out of every Export
+// download, but everything else about it stays exactly as reconciled, so
+// unticking it can't be confused with actually deciding those contigs
+// belong somewhere else. Default empty (every MAG included). Reset on
+// every fresh load.
+let excludedFromExportMagIds = new Set();
+
 // Phase 9 export: the loaded assembly's own File (re-sliced via
 // Blob.slice for per-MAG FASTA extraction, never re-uploaded) and its
 // parsed records, kept at module scope alongside workingAssignment since
@@ -322,6 +336,7 @@ function renderReconciliationCard(records, result, magSummaryData, filteredMagId
   const tools = result.tools;
 
   const magRows = magSummaryData
+    .map((m, i) => ({ ...m, rank: i + 1 })) // stable original rank (by starting contig-count size, bin-reconciliation.js) — unaffected by filtering or by any column sort applied to the rendered table afterwards
     .filter((m) => filteredMagIds.has(m.magId))
     .map((m) => {
       const toolCells = tools
@@ -333,7 +348,10 @@ function renderReconciliationCard(records, result, magSummaryData, filteredMagId
         })
         .join('');
       const isSelected = m.magId === selectedMagId;
-      return `<tr class="mag-picker-row${isSelected ? ' mag-picker-row-selected' : ''}">
+      const isIncludedInExport = !excludedFromExportMagIds.has(m.magId);
+      return `<tr class="mag-picker-row${isSelected ? ' mag-picker-row-selected' : ''}${isIncludedInExport ? '' : ' mag-picker-row-export-excluded'}">
+        <td><input type="checkbox" class="mag-export-checkbox" data-mag-id="${m.magId}" ${isIncludedInExport ? 'checked' : ''}></td>
+        <td class="num">${m.rank}</td>
         <td><button class="act mag-picker-select" type="button" data-mag-id="${m.magId}">${isSelected ? '● ' : ''}${m.magId}</button></td>
         <td class="num">${m.liveContigCount.toLocaleString()}</td>
         <td class="num">${m.inNetworkCount.toLocaleString()}</td>
@@ -355,8 +373,10 @@ function renderReconciliationCard(records, result, magSummaryData, filteredMagId
       <h3>Cross-tool reconciliation</h3>
       <div class="row-count">${tools.length} tools loaded (${tools.join(', ')}) &middot; ${magSummaryData.length.toLocaleString()} putative MAGs matched by contig overlap (reciprocal best hit, min Jaccard ${currentParams.minJaccard}) &middot; ${filteredMagIds.size.toLocaleString()} of ${magSummaryData.length.toLocaleString()} match the current MAG filters &middot; select a MAG to explore it below. Currently assigned/Completeness/Redundancy/Held here/Held elsewhere/Excluded reflect your current working decisions (see Export); Undisputed/Total associated/Unresolved are the original cross-tool vote counts (Unresolved only shrinks as ties get decided).</div>
       <div class="table-wrap scroll-panel">
-        <table class="data-table">
+        <table class="data-table" id="magPickerTable">
           <thead><tr>
+            <th title="Include this MAG in the export (unticking also excludes any contigs currently assigned to it)">Export</th>
+            <th class="num">#</th>
             <th>Putative MAG</th>
             <th class="num" title="Contigs currently assigned here in your working decisions (Undisputed + Held here + your decisions) — always found within Total associated">Currently assigned</th>
             <th class="num" title="Every contig any tool voted for this MAG, win or lose — what the contig network below actually shows. Can be far larger than Currently assigned: an unmatched bin still votes for all its own contigs even when other tools outvote it on nearly all of them.">Total associated</th>
@@ -1059,6 +1079,22 @@ async function extractBinFasta(binId, contigIds) {
  * manual reassignment made in the session (brief's "revised" framing),
  * not the originally loaded tables.
  */
+/**
+ * The working assignment with any MAG the user ticked off for export
+ * (excludedFromExportMagIds) — and every contig currently assigned to
+ * it — removed. Export-only: does not touch workingAssignment itself, so
+ * unticking a MAG later brings its contigs right back into the exports
+ * with no other state lost.
+ */
+function exportableWorkingAssignment() {
+  if (excludedFromExportMagIds.size === 0) return workingAssignment;
+  const filtered = new Map();
+  for (const [contigId, binId] of workingAssignment) {
+    if (!excludedFromExportMagIds.has(binId)) filtered.set(contigId, binId);
+  }
+  return filtered;
+}
+
 function initExportSection() {
   const { assignmentToRows, listBinIds } = window.ClannMAG.workingAssignment;
   const { computeBinSummaries } = window.ClannMAG.binSummary;
@@ -1067,7 +1103,7 @@ function initExportSection() {
   const card = document.getElementById('export-card');
   card.innerHTML = `
     <h3>Export</h3>
-    <div class="row-count">Exports reflect the current working assignment, including any reassignments made above.</div>
+    <div class="row-count">Exports reflect the current working assignment, including any reassignments made above${excludedFromExportMagIds.size > 0 ? `, excluding ${excludedFromExportMagIds.size.toLocaleString()} MAG(s) unticked for export above` : ''}.</div>
     <div class="row"><button class="act" id="exportAssignmentBtn" type="button">Download revised assignment table (CSV)</button></div>
     <div class="row"><button class="act" id="exportSummaryBtn" type="button">Download bin summary table (CSV)</button></div>
     <div class="row">
@@ -1079,19 +1115,19 @@ function initExportSection() {
 
   function refreshBinOptions() {
     document.getElementById('exportBinSelect').innerHTML =
-      listBinIds(workingAssignment).map((b) => `<option value="${b}">${b}</option>`).join('');
+      listBinIds(exportableWorkingAssignment()).map((b) => `<option value="${b}">${b}</option>`).join('');
   }
   refreshBinOptions();
   document.getElementById('exportBinSelect').addEventListener('focus', refreshBinOptions);
 
   document.getElementById('exportAssignmentBtn').addEventListener('click', () => {
-    const csv = assignmentToCsv(assignmentToRows(workingAssignment));
+    const csv = assignmentToCsv(assignmentToRows(exportableWorkingAssignment()));
     triggerDownload(new Blob([csv], { type: 'text/csv' }), 'contig-bin-assignment.csv');
   });
 
   document.getElementById('exportSummaryBtn').addEventListener('click', () => {
     refreshBinOptions();
-    const { summaries } = computeBinSummaries(currentRecords, assignmentToRows(workingAssignment), { thresholds: currentParams.mimag, recallRate: currentParams.recallRate });
+    const { summaries } = computeBinSummaries(currentRecords, assignmentToRows(exportableWorkingAssignment()), { thresholds: currentParams.mimag, recallRate: currentParams.recallRate });
     const csv = binSummaryToCsv(summaries);
     triggerDownload(new Blob([csv], { type: 'text/csv' }), 'bin-summary.csv');
   });
@@ -1275,6 +1311,7 @@ function setToolActive(tool, active) {
   selectedContigId = null;
   workingAssignmentInitialized = false;
   networkAlgorithm = 'ring';
+  excludedFromExportMagIds = new Set();
 
   recomputeLatest(latest.records, filterActiveBinTables()).then(() => {
     renderMagFiltersSection();
@@ -1508,6 +1545,7 @@ function renderFilteredExplorer() {
   if (toolsCard) initToolsCard();
   if (reconciliationResult) initMagNetwork(reconciliationResult, neighborhood, records);
   if (tools.length > 0) initExportSection();
+  restoreMagTableSort();
 }
 
 /**
@@ -1680,6 +1718,8 @@ function loadAssembly(file, binTablesByTool, coverageTable, krakenCalls) {
     decompressedAssemblyBytesCache = null;
     workingAssignmentInitialized = false;
     networkAlgorithm = 'ring';
+    magTableSortState = null;
+    excludedFromExportMagIds = new Set();
     selectedMagId = null;
     selectedContigId = null;
     showUncontendedContigs = false;
@@ -1879,42 +1919,80 @@ function initFilePicker() {
  * actually present, so it stays correct as rows are added/removed/edited
  * between clicks rather than being decided once up front.
  */
+/**
+ * The actual sort: reorders `table`'s tbody rows by column `colIndex`'s
+ * displayed text (numeric-aware, blanks/n-a sink to the bottom regardless
+ * of direction) and updates that header's sorted-asc/sorted-desc class.
+ * Split out from the click handler below so a table whose sort order
+ * needs to survive a wholesale innerHTML rebuild (magTableSortState,
+ * restoreMagTableSort) can re-apply the same sort programmatically
+ * without simulating a click.
+ */
+function sortDataTable(table, colIndex, direction) {
+  const tbody = table.querySelector('tbody');
+  const headerRow = table.querySelector('thead tr');
+  if (!tbody || !headerRow) return;
+  const headerCells = [...headerRow.children];
+  const th = headerCells[colIndex];
+  if (!th) return;
+
+  headerCells.forEach((cell) => cell.classList.remove('sorted-asc', 'sorted-desc'));
+  th.classList.add(direction === 'asc' ? 'sorted-asc' : 'sorted-desc');
+
+  const rows = [...tbody.rows];
+  const cellValue = (row) => {
+    const text = (row.cells[colIndex] ? row.cells[colIndex].textContent : '').trim();
+    const num = text === '' ? NaN : Number(text.replace(/[,%]/g, ''));
+    return { text, num };
+  };
+  const values = rows.map(cellValue);
+  const numericCount = values.filter((v) => !Number.isNaN(v.num)).length;
+  const isNumeric = numericCount >= values.length * 0.5; // majority-numeric column, e.g. a few "n/a" cells mixed in with numbers
+
+  const withValues = rows.map((row, i) => ({ row, value: values[i] }));
+  withValues.sort((a, b) => {
+    const aEmpty = isNumeric ? Number.isNaN(a.value.num) : a.value.text === '';
+    const bEmpty = isNumeric ? Number.isNaN(b.value.num) : b.value.text === '';
+    if (aEmpty || bEmpty) return aEmpty - bEmpty; // blank/n-a cells always sink to the bottom, regardless of direction
+    const cmp = isNumeric ? a.value.num - b.value.num : a.value.text.localeCompare(b.value.text);
+    return direction === 'asc' ? cmp : -cmp;
+  });
+  for (const { row } of withValues) tbody.appendChild(row);
+}
+
+/**
+ * Click-to-sort for every `table.data-table` in the page, via one
+ * delegated document listener (tables are rebuilt wholesale via
+ * innerHTML as data changes, so a delegated listener keeps working
+ * across re-renders with nothing to re-attach). The MAG picker table
+ * specifically (#magPickerTable) also remembers its sort in
+ * magTableSortState, since renderFilteredExplorer rebuilds that table's
+ * HTML from result.putativeMags's own fixed order on nearly every
+ * interaction — selecting a MAG, deciding a contig, toggling a filter —
+ * and without this, each of those would silently discard whatever sort
+ * the student had clicked into, snapping the table back to the top.
+ */
 function initSortableTables() {
   document.addEventListener('click', (e) => {
     const th = e.target.closest('table.data-table thead th');
     if (!th) return;
     const table = th.closest('table');
-    const tbody = table.querySelector('tbody');
-    if (!tbody) return;
     const headerRow = th.parentElement;
-    const headerCells = [...headerRow.children];
-    const colIndex = headerCells.indexOf(th);
+    const colIndex = [...headerRow.children].indexOf(th);
     if (colIndex < 0) return;
 
-    const nextDir = th.classList.contains('sorted-asc') ? 'desc' : 'asc';
-    headerCells.forEach((cell) => cell.classList.remove('sorted-asc', 'sorted-desc'));
-    th.classList.add(nextDir === 'asc' ? 'sorted-asc' : 'sorted-desc');
-
-    const rows = [...tbody.rows];
-    const cellValue = (row) => {
-      const text = (row.cells[colIndex] ? row.cells[colIndex].textContent : '').trim();
-      const num = text === '' ? NaN : Number(text.replace(/[,%]/g, ''));
-      return { text, num };
-    };
-    const values = rows.map(cellValue);
-    const numericCount = values.filter((v) => !Number.isNaN(v.num)).length;
-    const isNumeric = numericCount >= values.length * 0.5; // majority-numeric column, e.g. a few "n/a" cells mixed in with numbers
-
-    const withValues = rows.map((row, i) => ({ row, value: values[i] }));
-    withValues.sort((a, b) => {
-      const aEmpty = isNumeric ? Number.isNaN(a.value.num) : a.value.text === '';
-      const bEmpty = isNumeric ? Number.isNaN(b.value.num) : b.value.text === '';
-      if (aEmpty || bEmpty) return aEmpty - bEmpty; // blank/n-a cells always sink to the bottom, regardless of direction
-      const cmp = isNumeric ? a.value.num - b.value.num : a.value.text.localeCompare(b.value.text);
-      return nextDir === 'asc' ? cmp : -cmp;
-    });
-    for (const { row } of withValues) tbody.appendChild(row);
+    const direction = th.classList.contains('sorted-asc') ? 'desc' : 'asc';
+    sortDataTable(table, colIndex, direction);
+    if (table.id === 'magPickerTable') magTableSortState = { colIndex, direction };
   });
+}
+
+/** Re-applies the MAG picker table's remembered sort (see initSortableTables) after renderFilteredExplorer rebuilds it. */
+function restoreMagTableSort() {
+  if (!magTableSortState) return;
+  const table = document.getElementById('magPickerTable');
+  if (!table) return;
+  sortDataTable(table, magTableSortState.colIndex, magTableSortState.direction);
 }
 
 /**
@@ -1931,6 +2009,14 @@ function initMagPicker() {
     const magId = btn.dataset.magId;
     selectedMagId = selectedMagId === magId ? null : magId;
     selectedContigId = null;
+    renderFilteredExplorer();
+  });
+  document.addEventListener('change', (e) => {
+    const checkbox = e.target.closest('.mag-export-checkbox');
+    if (!checkbox || !latest) return;
+    const magId = checkbox.dataset.magId;
+    if (checkbox.checked) excludedFromExportMagIds.delete(magId);
+    else excludedFromExportMagIds.add(magId);
     renderFilteredExplorer();
   });
 }

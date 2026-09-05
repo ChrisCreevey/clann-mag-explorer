@@ -207,6 +207,7 @@ main > *, #wrap, #explorer, .card{min-width:0}
 
 /* ---- MAG picker table (cross-tool reconciliation card) ---- */
 .mag-picker-row-selected{background:color-mix(in srgb, var(--accent) 12%, transparent)}
+.mag-picker-row-export-excluded{opacity:.5}
 
 /* ---- Binning tools section (left pane) ---- */
 .tool-row-inactive{opacity:.5}
