@@ -167,6 +167,7 @@ table.data-table th.sorted-asc::after{content:" ▴"}
 table.data-table th.sorted-desc::after{content:" ▾"}
 table.data-table tbody tr:hover{background:color-mix(in srgb,var(--accent) 8%,transparent)}
 table.data-table td.num{font-family:var(--font-mono);text-align:right}
+table.data-table th.num{text-align:right}
 
 .table-wrap{overflow:auto}
 .scroll-panel{max-height:22rem;overflow-y:auto;overflow-x:auto;border:1px solid var(--line);border-radius:6px}

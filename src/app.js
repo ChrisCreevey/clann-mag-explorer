@@ -325,11 +325,11 @@ function renderReconciliationCard(records, result, magSummaryData, filteredMagId
         <table class="data-table">
           <thead><tr>
             <th>Putative MAG</th>
-            <th title="Contigs currently assigned here in your working decisions">Contigs</th>
-            <th title="Contigs every voting tool originally agreed belong to this MAG">Core</th>
-            <th title="Contigs originally assigned here by some but not all voting tools">Disputed</th>
-            <th title="Recall-adjusted, from the current working assignment — see Thresholds & parameters">Completeness</th>
-            <th title="Recall-adjusted, from the current working assignment — see Thresholds & parameters">Redundancy</th>
+            <th class="num" title="Contigs currently assigned here in your working decisions">Contigs</th>
+            <th class="num" title="Contigs every voting tool originally agreed belong to this MAG">Core</th>
+            <th class="num" title="Contigs originally assigned here by some but not all voting tools">Disputed</th>
+            <th class="num" title="Recall-adjusted, from the current working assignment — see Thresholds & parameters">Completeness</th>
+            <th class="num" title="Recall-adjusted, from the current working assignment — see Thresholds & parameters">Redundancy</th>
             <th>Tier</th>
             ${tools.map((t) => `<th>${t}</th>`).join('')}
           </tr></thead>
@@ -707,10 +707,10 @@ function renderContigEvidence(contigId, result, records) {
           <thead><tr>
             <th>Candidate MAG</th>
             ${tools.map((t) => `<th title="This tool's own bin ID, if it voted this contig into this MAG">${t}</th>`).join('')}
-            <th title="Mean GC% of this MAG's other core (unanimous-agreement) contigs">MAG mean GC</th>
-            <th title="This contig's GC% minus the MAG's mean core GC%">GC diff</th>
-            <th title="Mean coverage depth of this MAG's other core contigs">MAG mean cov.</th>
-            <th title="This contig's mean coverage divided by the MAG's mean core coverage">Cov. ratio</th>
+            <th class="num" title="Mean GC% of this MAG's other core (unanimous-agreement) contigs">MAG mean GC</th>
+            <th class="num" title="This contig's GC% minus the MAG's mean core GC%">GC diff</th>
+            <th class="num" title="Mean coverage depth of this MAG's other core contigs">MAG mean cov.</th>
+            <th class="num" title="This contig's mean coverage divided by the MAG's mean core coverage">Cov. ratio</th>
             <th title="This contig's marker-gene families, and whether assigning it here would be a unique contribution or a duplicate">Marker genes</th>
             <th>Decision</th>
           </tr></thead>
@@ -1085,9 +1085,9 @@ function renderToolsCard() {
       <table class="data-table">
         <thead><tr>
           <th>Tool</th>
-          <th title="Total contig rows this tool assigned to a bin">Contigs</th>
-          <th title="Distinct bins this tool produced">Bins</th>
-          <th title="Fraction of this tool's bins containing exactly one contig — high values suggest fragmented, low-signal output">Singleton bins</th>
+          <th class="num" title="Total contig rows this tool assigned to a bin">Contigs</th>
+          <th class="num" title="Distinct bins this tool produced">Bins</th>
+          <th class="num" title="Fraction of this tool's bins containing exactly one contig — high values suggest fragmented, low-signal output">Singleton bins</th>
         </tr></thead>
         <tbody>${rows}</tbody>
       </table>
@@ -1265,7 +1265,7 @@ function renderFilteredExplorer() {
         <div class="row-count" style="margin-top:8px">${sorted.length.toLocaleString()} of ${records.length.toLocaleString()} contigs match the current contig filters, longest first</div>
         <div class="table-wrap scroll-panel">
           <table class="data-table">
-            <thead><tr><th>Contig</th><th>Length</th><th>GC%</th><th>GC skew</th><th>Coding density</th><th>Marker genes</th><th title="Non-uniform FASTA line wrapping">⚠</th></tr></thead>
+            <thead><tr><th>Contig</th><th class="num">Length</th><th class="num">GC%</th><th class="num">GC skew</th><th class="num">Coding density</th><th>Marker genes</th><th class="num" title="Non-uniform FASTA line wrapping">⚠</th></tr></thead>
             <tbody>${rows}</tbody>
           </table>
         </div>
@@ -1699,14 +1699,14 @@ function renderOutlierCard(flags, { hasCoverage, hasTaxonomy, hasKraken, hasCros
         <table class="data-table">
           <thead><tr>
             <th>Contig</th><th>Bin / MAG</th>
-            <th title="Standard deviations from this bin's composition centroid">Comp Z</th>
-            <th title="Standard deviations from this bin's coverage centroid">Cov Z</th>
-            <th title="Marker families found only on this contig within its bin">Unique</th>
-            <th title="Marker families also found elsewhere in this bin">Redundant</th>
-            <th title="How far this contig's marker provenance sits from the rest of its bin's consensus lineage">Tax dist.</th>
+            <th class="num" title="Standard deviations from this bin's composition centroid">Comp Z</th>
+            <th class="num" title="Standard deviations from this bin's coverage centroid">Cov Z</th>
+            <th class="num" title="Marker families found only on this contig within its bin">Unique</th>
+            <th class="num" title="Marker families also found elsewhere in this bin">Redundant</th>
+            <th class="num" title="How far this contig's marker provenance sits from the rest of its bin's consensus lineage">Tax dist.</th>
             <th title="This contig's Kraken2 call disagrees with its bin's majority call">Kraken</th>
-            <th title="Cross-tool agreement fraction (Phase 5)">Agreement</th>
-            <th title="Count of signals flagged for this contig">Flags</th>
+            <th class="num" title="Cross-tool agreement fraction (Phase 5)">Agreement</th>
+            <th class="num" title="Count of signals flagged for this contig">Flags</th>
           </tr></thead>
           <tbody>${rows}</tbody>
         </table>
