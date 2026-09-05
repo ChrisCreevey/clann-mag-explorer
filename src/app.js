@@ -384,29 +384,56 @@ function buildMagNeighborhood(selectedMagId, result, opts = {}) {
 
   const primaryContigIds = latest.contigIdsByMagId.get(selectedMagId) || new Set();
 
-  const secondaryMagIds = new Set();
+  // Weight each secondary MAG by how many of the selected MAG's contigs
+  // actually contend with it. Real multi-tool data can have a MAG
+  // "contending" with hundreds of secondaries — a fragmenting tool (VAMB
+  // producing near-one-bin-per-contig output, on a real dataset that
+  // surfaced this) means the overwhelming majority of those secondaries
+  // share exactly one contig with the selected MAG, pure noise next to
+  // the handful that are a genuine, substantial rival. Showing every one
+  // as its own hub, unbounded, makes the ring unreadable and buries the
+  // real dispute — only the top HUB_LIMIT by weight become hubs.
+  const secondaryWeight = new Map();
   for (const contigId of primaryContigIds) {
     const entry = latest.contigAgreementEntryByContigId.get(contigId);
-    if (!entry) continue;
+    if (!entry || entry.distinctGroupsVoted <= 1) continue;
     for (const magId of Object.values(entry.votes)) {
-      if (magId && magId !== selectedMagId && magsById.has(magId)) secondaryMagIds.add(magId);
+      if (magId && magId !== selectedMagId && magsById.has(magId)) {
+        secondaryWeight.set(magId, (secondaryWeight.get(magId) || 0) + 1);
+      }
     }
   }
+  const HUB_LIMIT = 40;
+  const allSecondaryMagIds = [...secondaryWeight.keys()];
+  const rankedSecondaryMagIds = allSecondaryMagIds.sort((a, b) => secondaryWeight.get(b) - secondaryWeight.get(a) || a.localeCompare(b));
+  const secondaryMagIds = new Set(rankedSecondaryMagIds.slice(0, HUB_LIMIT));
+  const hiddenSecondaryCount = allSecondaryMagIds.length - secondaryMagIds.size;
 
   const shownMagIds = new Set([selectedMagId, ...secondaryMagIds]);
   const shownMags = [...shownMagIds].map((id) => magsById.get(id));
 
   // The selected MAG's own contigs: contended ones (entry.distinctGroupsVoted
   // > 1 — bin-reconciliation.js's count of how many distinct MAGs got a vote
-  // for this contig) always show, since resolving contention is the point of
-  // this view; uncontended ones only show when that toggle is on.
+  // for this contig) show only if at least one of the *other* MAGs they
+  // contend with actually made the hub cut above — a contig whose sole
+  // rival was trimmed as noise is left out of this view entirely (counted
+  // in hiddenLowRelevanceCount) rather than drawn as if it were
+  // uncontested, which would misrepresent it. Uncontended contigs only
+  // show when that toggle is on.
   const contigIdSet = new Set();
   let hiddenUncontendedCount = 0;
+  let hiddenLowRelevanceCount = 0;
   for (const contigId of primaryContigIds) {
     const entry = latest.contigAgreementEntryByContigId.get(contigId);
     const contended = entry && entry.distinctGroupsVoted > 1;
-    if (contended || includeUncontended) contigIdSet.add(contigId);
-    else hiddenUncontendedCount++;
+    if (!contended) {
+      if (includeUncontended) contigIdSet.add(contigId);
+      else hiddenUncontendedCount++;
+      continue;
+    }
+    const stillContendedInView = Object.values(entry.votes).some((magId) => magId && magId !== selectedMagId && shownMagIds.has(magId));
+    if (stillContendedInView) contigIdSet.add(contigId);
+    else hiddenLowRelevanceCount++;
   }
 
   // A secondary MAG's own full contig set only shows when that toggle is
@@ -467,9 +494,9 @@ function buildMagNeighborhood(selectedMagId, result, opts = {}) {
   return {
     hubs, leaves, edges, truncated,
     totalContigs: contigIds.length, allTotalContigs: allContigIds.length,
-    secondaryCount: secondaryMagIds.size,
+    secondaryCount: secondaryMagIds.size, totalSecondaryCount: allSecondaryMagIds.length, hiddenSecondaryCount,
     tiedCount: leaves.filter((l) => l.state === 'tied').length,
-    hiddenUncontendedCount, hiddenConnectedCount,
+    hiddenUncontendedCount, hiddenConnectedCount, hiddenLowRelevanceCount,
   };
 }
 
@@ -528,12 +555,14 @@ function initMagNetwork(result, neighborhood, records) {
   }
 
   note.textContent = `${selectedMagId}: ${neighborhood.totalContigs.toLocaleString()} contig(s) shown` +
-    (neighborhood.secondaryCount > 0
-      ? ` across ${neighborhood.hubs.length} MAG(s) (contending with ${neighborhood.secondaryCount})`
+    (neighborhood.totalSecondaryCount > 0
+      ? ` across ${neighborhood.hubs.length} MAG(s) (contending with ${neighborhood.totalSecondaryCount.toLocaleString()})`
       : ', no contested overlaps with other MAGs') +
+    (neighborhood.hiddenSecondaryCount > 0 ? ` — ${neighborhood.hiddenSecondaryCount.toLocaleString()} more rival MAG(s) share only a contig or two each, hidden for readability` : '') +
     (neighborhood.tiedCount > 0 ? ` — ${neighborhood.tiedCount} tied, with no majority vote at all (bright ring)` : '') +
     (neighborhood.hiddenUncontendedCount > 0 ? ` — ${neighborhood.hiddenUncontendedCount.toLocaleString()} uncontended contig(s) hidden, toggle above to show` : '') +
     (neighborhood.hiddenConnectedCount > 0 ? ` — ${neighborhood.hiddenConnectedCount.toLocaleString()} more contig(s) available from connected MAGs, toggle above to show` : '') +
+    (neighborhood.hiddenLowRelevanceCount > 0 ? ` — ${neighborhood.hiddenLowRelevanceCount.toLocaleString()} disputed contig(s) hidden (their only rival MAG isn't shown)` : '') +
     (neighborhood.truncated ? ` — truncated from ${neighborhood.allTotalContigs.toLocaleString()} for readability, narrow with MAG filters` : '') +
     '. Click a contig to compare evidence and decide where it belongs (selection stays highlighted); click another MAG to explore its neighborhood.';
 
