@@ -1,11 +1,6 @@
 const { test, report, assert } = require('./harness');
 const { sniff } = require('../src/parsers/sniff');
 
-test('sniffs a breport-shaped file', () => {
-  const text = '100.00\t500\t500\tR\t1\troot\n50.00\t250\t250\tD\t2\tBacteria\n';
-  assert.strictEqual(sniff(text).format, 'breport');
-});
-
 test('sniffs a DAS_Tool-style contig-bin table', () => {
   const text = 'contig_1\tbin.1\ncontig_2\tbin.2\n';
   assert.strictEqual(sniff(text).format, 'contig-bin-table');

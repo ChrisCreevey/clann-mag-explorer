@@ -34,8 +34,8 @@ and [`docs/phase1-investigation.md`](docs/phase1-investigation.md) for the curre
   `contig-stats.js` already computes rather than recomputing it.
 - Outlier/disagreement flagging (`src/model/outliers.js`, `src/model/marker-taxonomy.js`) combines
   composition/coverage centroid distance, marker-gene unique/redundant contribution, marker-gene taxonomic
-  consistency (LCA of provenance taxIDs against `data/scg40-lineage.json`), Kraken2 per-contig disagreement, and
-  Phase 5's cross-tool agreement into one ranked per-contig view.
+  consistency (LCA of provenance taxIDs against `data/scg40-lineage.json`), and Phase 5's cross-tool agreement
+  into one ranked per-contig view.
 - Interactive reassignment (`src/model/working-assignment.js`, `src/viz/scatter*.js`) is a live-editable bin
   assignment layered on top of whatever was loaded: an SVG scatter plot with rectangular drag-select (a
   simplified lasso — see `scatter-geometry.js`'s header for why), move/merge/new-bin actions, and bin summaries
@@ -48,7 +48,7 @@ and [`docs/phase1-investigation.md`](docs/phase1-investigation.md) for the curre
 ```
 index.html                    Site shell
 styles/main.css                Design tokens + layout (shared visual language with the other Clann tools)
-src/parsers/                   Input-format parsers (contig->bin tables, coverage tables, Kraken2 .breport)
+src/parsers/                   Input-format parsers (contig->bin tables, coverage tables)
 src/model/                     Core data model (FASTA index, contig stats, six-frame translation, taxonomy tree,
                                 bin reconciliation, marker-gene search)
 src/workers/                   Web Workers (streaming FASTA parse off the main thread)

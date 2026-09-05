@@ -139,43 +139,6 @@ function computeMarkerContributions(binContigs) {
   return contributions;
 }
 
-/**
- * Taxonomic-disagreement flag: a contig whose Kraken2 call differs from
- * the rest of its bin. Scope decision: exact-taxID majority-vote
- * mismatch, not lineage-aware (e.g. two different species in the same
- * genus would still count as a "disagreement" here) — a full lineage-
- * aware version would need a taxonomy tree covering whatever arbitrary
- * taxIDs Kraken2's default database calls, out of scope here.
- *
- * Currently unused: this fed the Outlier & disagreement flagging card,
- * removed since it didn't add to the contig-resolution workflow the app
- * is now built around — along with it went marker-taxonomy.js and
- * src/model/taxonomy-tree.js (the marker-gene provenance/LCA machinery),
- * which had no other caller. Kraken2 input is still parsed and attached
- * to records as `krakenTaxId` (kraken2-contigs.js, app.js's
- * attachAuxiliaryData) but currently has no visible effect. Left in
- * place as a working, tested building block rather than deleted, in
- * case a Kraken2-based view returns in some other form.
- * @param {object[]} binContigs - per-contig records with an optional
- *   `krakenTaxId: number` (from kraken2-contigs.js)
- * @returns {Map<string, boolean>} contigId -> true if this contig's call
- *   disagrees with the bin's majority call (only set for contigs that
- *   have a call at all, in a bin where at least 2 contigs do)
- */
-function computeKrakenDisagreement(binContigs) {
-  const withCalls = binContigs.filter((c) => c.krakenTaxId != null);
-  const disagreement = new Map();
-  if (withCalls.length < 2) return disagreement;
-
-  const counts = new Map();
-  for (const c of withCalls) counts.set(c.krakenTaxId, (counts.get(c.krakenTaxId) || 0) + 1);
-  let majorityTaxId = null, majorityCount = 0;
-  for (const [taxId, count] of counts) if (count > majorityCount) { majorityCount = count; majorityTaxId = taxId; }
-
-  for (const c of withCalls) disagreement.set(c.id, c.krakenTaxId !== majorityTaxId);
-  return disagreement;
-}
-
 function mimagTier(completeness, contamination, thresholds) {
   const t = { ...DEFAULT_MIMAG_THRESHOLDS, ...thresholds };
   if (completeness > t.highMinCompleteness && contamination < t.highMaxContamination) return 'high';
@@ -230,7 +193,7 @@ function computeBinSummaries(contigRecords, assignments, options = {}) {
 
 const exportsObj = {
   TOTAL_MARKER_FAMILIES, DEFAULT_MIMAG_THRESHOLDS, DEFAULT_ESTIMATED_RECALL,
-  computeN50L50, computeCompletenessRedundancy, computeMarkerContributions, computeKrakenDisagreement,
+  computeN50L50, computeCompletenessRedundancy, computeMarkerContributions,
   mimagTier, computeBinSummaries,
 };
 if (typeof module !== 'undefined' && module.exports) module.exports = exportsObj;

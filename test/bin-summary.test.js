@@ -1,6 +1,6 @@
 const { test, report, assert } = require('./harness');
 const {
-  computeN50L50, computeCompletenessRedundancy, computeMarkerContributions, computeKrakenDisagreement,
+  computeN50L50, computeCompletenessRedundancy, computeMarkerContributions,
   mimagTier, computeBinSummaries,
 } = require('../src/model/bin-summary');
 
@@ -123,28 +123,6 @@ test('computeMarkerContributions: a contig with no marker hits contributes nothi
   const contributions = computeMarkerContributions(binContigs);
   assert.deepStrictEqual(contributions.get('c1'), { uniqueFamilies: [], redundantFamilies: [] });
   assert.deepStrictEqual(contributions.get('c2'), { uniqueFamilies: [], redundantFamilies: [] });
-});
-
-test('computeKrakenDisagreement flags the minority call(s), not the majority', () => {
-  const binContigs = [
-    { id: 'c1', krakenTaxId: 562 }, { id: 'c2', krakenTaxId: 562 }, { id: 'c3', krakenTaxId: 999 },
-  ];
-  const disagreement = computeKrakenDisagreement(binContigs);
-  assert.strictEqual(disagreement.get('c1'), false);
-  assert.strictEqual(disagreement.get('c2'), false);
-  assert.strictEqual(disagreement.get('c3'), true);
-});
-
-test('computeKrakenDisagreement returns no flags when fewer than 2 contigs have a call', () => {
-  const disagreement = computeKrakenDisagreement([{ id: 'c1', krakenTaxId: 562 }, { id: 'c2' }]);
-  assert.strictEqual(disagreement.size, 0);
-});
-
-test('computeKrakenDisagreement ignores contigs with no call at all', () => {
-  const binContigs = [{ id: 'c1', krakenTaxId: 562 }, { id: 'c2', krakenTaxId: 562 }, { id: 'c3' }];
-  const disagreement = computeKrakenDisagreement(binContigs);
-  assert.strictEqual(disagreement.has('c3'), false);
-  assert.strictEqual(disagreement.get('c1'), false);
 });
 
 test('mimagTier: high quality needs both completeness and contamination clear', () => {

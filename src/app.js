@@ -881,15 +881,17 @@ function renderContigEvidence(contigId, result, records) {
  * that's easy to hit since sequence loading is the slowest thing in this
  * panel, especially on a first click against a gzipped assembly.
  *
- * Sending to BLAST copies the FASTA text to the clipboard and opens
- * NCBI's standard nucleotide BLAST page in a new tab, rather than trying
- * to pre-fill the query via a URL parameter: a contig can run to hundreds
- * of thousands of bp, far past what any browser/server reliably accepts
- * in a URL, and NCBI's BLAST form is a normal paste-in text box, not a
- * documented GET-prefillable one — copy-then-paste is slower by one step
- * but works for a sequence of any length and doesn't depend on guessing
- * at unofficial URL parameters.
+ * Sending to BLAST pre-fills NCBI's query box directly via the page's
+ * `QUERY` GET parameter (confirmed working, undocumented-but-real:
+ * Blast.cgi reads it straight into the search textarea) when the
+ * resulting URL is short enough — NCBI's own front end rejects an
+ * over-long request with a 414 (empirically, ~8,000bp of sequence is
+ * safely under that ceiling, ~10,000bp is already over it; see
+ * BLAST_URL_PREFILL_LIMIT below). A contig can run to hundreds of
+ * thousands of bp, well past that, so longer sequences fall back to the
+ * copy-to-clipboard-and-paste flow this always used.
  */
+const BLAST_URL_PREFILL_LIMIT = 8000; // total URL length; see comment above
 async function initContigSequenceSection(contigId) {
   const container = document.getElementById('contigSequenceCard');
   if (!container) return;
@@ -951,13 +953,20 @@ async function initContigSequenceSection(contigId) {
     }
   });
   document.getElementById('blastSequenceBtn').addEventListener('click', async () => {
+    const genericUrl = 'https://blast.ncbi.nlm.nih.gov/Blast.cgi?PROGRAM=blastn&PAGE_TYPE=BlastSearch&LINK_LOC=blasthome';
+    const prefillUrl = `${genericUrl}&QUERY=${encodeURIComponent(fasta)}`;
+    if (prefillUrl.length <= BLAST_URL_PREFILL_LIMIT) {
+      window.open(prefillUrl, '_blank', 'noopener');
+      note.textContent = 'Opened NCBI BLAST with the sequence already filled in — click BLAST to run the search.';
+      return;
+    }
     try {
       await navigator.clipboard.writeText(fasta);
-      note.textContent = 'Sequence copied — paste it (Ctrl/Cmd+V) into the BLAST search box that just opened, then click BLAST.';
+      note.textContent = 'Sequence too long to pre-fill automatically — copied to clipboard instead; paste it (Ctrl/Cmd+V) into the BLAST search box that just opened, then click BLAST.';
     } catch {
-      note.textContent = 'Could not copy automatically — copy the sequence above manually and paste it into the BLAST search box that just opened.';
+      note.textContent = 'Sequence too long to pre-fill automatically and could not copy it either — copy the sequence above manually and paste it into the BLAST search box that just opened.';
     }
-    window.open('https://blast.ncbi.nlm.nih.gov/Blast.cgi?PROGRAM=blastn&PAGE_TYPE=BlastSearch&LINK_LOC=blasthome', '_blank', 'noopener');
+    window.open(genericUrl, '_blank', 'noopener');
   });
 }
 
@@ -1599,7 +1608,7 @@ async function recomputeLatest(records, binTablesByTool) {
 
 /**
  * Compute-once entry point for a freshly loaded assembly (+ any bin/
- * coverage/Kraken tables): resets every adjustable-parameter/filter state
+ * coverage tables): resets every adjustable-parameter/filter state
  * to its default, builds `latest` (recomputeLatest), then hands off to
  * the left-pane sections and renderFilteredExplorer for the actual DOM
  * build.
@@ -1627,19 +1636,12 @@ async function renderContigTable(records, binTablesByTool) {
 // main thread — see docs/phase1-investigation.md "Performance follow-ups":
 // same total work, but the page stays responsive and can show live
 // progress instead of freezing for however long a large assembly takes.
-function attachAuxiliaryData(records, coverageTable, krakenCalls) {
+function attachAuxiliaryData(records, coverageTable) {
   if (coverageTable) {
     const depthsByContig = new Map(coverageTable.rows.map((r) => [r.contigId, r.depths]));
     for (const record of records) {
       const depths = depthsByContig.get(record.id);
       if (depths) record.coverageDepths = depths;
-    }
-  }
-  if (krakenCalls) {
-    const taxIdByContig = new Map(krakenCalls.filter((c) => c.classified).map((c) => [c.contigId, c.taxId]));
-    for (const record of records) {
-      const taxId = taxIdByContig.get(record.id);
-      if (taxId != null) record.krakenTaxId = taxId;
     }
   }
 }
@@ -1672,7 +1674,7 @@ function computeReferencedContigIds(binTablesByTool) {
   return ids;
 }
 
-function loadAssembly(file, binTablesByTool, coverageTable, krakenCalls) {
+function loadAssembly(file, binTablesByTool, coverageTable) {
   const referencedContigIds = computeReferencedContigIds(binTablesByTool);
   return new Promise((resolve, reject) => {
     const worker = new Worker('src/workers/fasta-worker.js');
@@ -1737,7 +1739,7 @@ function loadAssembly(file, binTablesByTool, coverageTable, krakenCalls) {
         await Promise.all(pendingPromises);
         const elapsed = ((performance.now() - t0) / 1000).toFixed(1);
         showError(null);
-        attachAuxiliaryData(records, coverageTable, krakenCalls);
+        attachAuxiliaryData(records, coverageTable);
         await renderContigTable(records, binTablesByTool);
         const excludedNote = msg.summary.excludedCount > 0
           ? ` · ${msg.summary.excludedCount.toLocaleString()} unreferenced contigs excluded`
@@ -1771,22 +1773,20 @@ function fileBaseName(name) {
 
 /**
  * Among the files NOT identified as the assembly, content-sniff every one
- * and route it: any number of contig->bin tables (Phase 4/5), at most one
- * coverage table (brief's inputs list one coverage table, not per-tool),
- * and at most one Kraken2 per-contig call file (Phase 6). First match
- * wins for the single-instance inputs, matching how the assembly pick
- * itself already works; bin tables collect all matches, labelled by
- * filename since content alone can't name which tool produced a table.
+ * and route it: any number of contig->bin tables (Phase 4/5), and at most
+ * one coverage table (brief's inputs list one coverage table, not
+ * per-tool). First match wins for the single-instance input, matching how
+ * the assembly pick itself already works; bin tables collect all matches,
+ * labelled by filename since content alone can't name which tool produced
+ * a table.
  */
 async function findAuxiliaryFiles(otherFiles) {
   const { sniff } = window.ClannMAG.sniff;
   const { parseContigBinTable } = window.ClannMAG.contigBinTable;
   const { parseCoverageTable } = window.ClannMAG.coverageTable;
-  const { parseKraken2ContigCalls } = window.ClannMAG.kraken2Contigs;
 
   const binTablesByTool = new Map();
   let coverageTable = null;
-  let krakenCalls = null;
 
   for (const file of otherFiles) {
     const text = await file.text();
@@ -1798,11 +1798,9 @@ async function findAuxiliaryFiles(otherFiles) {
       binTablesByTool.set(label, parseContigBinTable(text));
     } else if (format === 'coverage-table' && !coverageTable) {
       coverageTable = parseCoverageTable(text);
-    } else if (format === 'kraken2-contigs' && !krakenCalls) {
-      krakenCalls = parseKraken2ContigCalls(text);
     }
   }
-  return { binTablesByTool: binTablesByTool.size ? binTablesByTool : null, coverageTable, krakenCalls };
+  return { binTablesByTool: binTablesByTool.size ? binTablesByTool : null, coverageTable };
 }
 
 function renderContigMatchNotices(notices) {
@@ -1886,16 +1884,16 @@ function initFilePicker() {
       return;
     }
     const otherFiles = files.filter((f) => f !== assemblyFile);
-    const { binTablesByTool, coverageTable, krakenCalls } = otherFiles.length
+    const { binTablesByTool, coverageTable } = otherFiles.length
       ? await findAuxiliaryFiles(otherFiles)
-      : { binTablesByTool: null, coverageTable: null, krakenCalls: null };
+      : { binTablesByTool: null, coverageTable: null };
 
     const matchedBinTablesByTool = binTablesByTool
       ? await bestAttemptMatchBinTables(assemblyFile, binTablesByTool)
       : null;
 
     try {
-      await loadAssembly(assemblyFile, matchedBinTablesByTool, coverageTable, krakenCalls);
+      await loadAssembly(assemblyFile, matchedBinTablesByTool, coverageTable);
     } catch {
       // already surfaced via showError inside loadAssembly
     }

@@ -87,7 +87,7 @@
             they disagree &mdash; then reassign contigs interactively. Everything runs locally; nothing is
             uploaded to a server.
           </div>
-          <div class="exts">.fasta/.fa/.fna &middot; contig&rarr;bin tables &middot; coverage depth &middot; Kraken2 report</div>
+          <div class="exts">.fasta/.fa/.fna &middot; contig&rarr;bin tables &middot; coverage depth</div>
           <button id="emptyOpen" type="button">Choose files&hellip;</button>
           <div class="scroll-hint">&darr; About &amp; FAQ</div>
         </div>
@@ -110,7 +110,6 @@
             <li><strong>Assembly</strong> &mdash; a contig FASTA (<code>.fasta</code>/<code>.fa</code>/<code>.fna</code>, optionally gzip-compressed), source of every per-contig statistic.</li>
             <li><strong>Contig&rarr;bin table</strong> (one or more) &mdash; a two-column tab/CSV file per binning tool, contig ID and bin ID.</li>
             <li><strong>Coverage depth table</strong> &mdash; contig ID plus one depth column per sample.</li>
-            <li><strong>Kraken2 report</strong> &mdash; per-contig taxonomic call, reusing <a href="https://chriscreevey.github.io/clann-edna-explorer/" target="_blank" rel="noopener">Clann eDNA Explorer</a>'s report parser.</li>
           </ul>
           <p>
             Every format is identified by file <strong>content</strong>, not filename or extension.
@@ -145,8 +144,6 @@
 
   <script src="src/parsers/contig-bin-table.js"></script>
   <script src="src/parsers/coverage-table.js"></script>
-  <script src="src/parsers/breport.js"></script>
-  <script src="src/parsers/kraken2-contigs.js"></script>
   <script src="src/parsers/sniff.js"></script>
   <script src="src/model/dna-codes.js"></script>
   <script src="src/model/translate.js"></script>
