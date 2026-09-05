@@ -1034,7 +1034,6 @@ function setToolActive(tool, active) {
   networkAlgorithm = 'ring';
 
   recomputeLatest(latest.records, filterActiveBinTables()).then(() => {
-    renderToolsSection();
     renderMagFiltersSection();
     renderFiltersSection();
     renderFilteredExplorer();
@@ -1042,23 +1041,19 @@ function setToolActive(tool, active) {
 }
 
 /**
- * Renders the "Binning tools" left-pane section (index.html's previously
- * unwired #toolsSectionBody stub) — per-tool bin/contig counts and,
- * specifically, each tool's singleton-bin fraction, the single number
- * that would have flagged a real fragmented-tool problem immediately
- * rather than needing to be root-caused through the network view three
- * layers downstream. Always lists every *loaded* tool (allBinTablesByTool),
- * not just the active ones, so excluding a tool doesn't remove the only
- * way to re-include it.
+ * Renders the "Binning tools" card — right pane, directly under Assembly
+ * summary, since it's a property of the loaded run as a whole rather than
+ * a filter (unlike the left-pane sections). Per-tool bin/contig counts
+ * and, specifically, each tool's singleton-bin fraction, the single
+ * number that would have flagged a real fragmented-tool problem
+ * immediately rather than needing to be root-caused through the network
+ * view three layers downstream. Always lists every *loaded* tool
+ * (allBinTablesByTool), not just the active ones, so excluding a tool
+ * doesn't remove the only way to re-include it. Returns an HTML string
+ * like the other right-pane cards (renderReconciliationCard etc.) — call
+ * initToolsCard() after it's in the DOM to wire the checkboxes.
  */
-function renderToolsSection() {
-  const body = document.getElementById('toolsSectionBody');
-  if (!body) return;
-  if (!allBinTablesByTool || allBinTablesByTool.size === 0) {
-    body.innerHTML = '<div class="hint">Load one or more contig&rarr;bin tables to see per-tool stats here.</div>';
-    return;
-  }
-
+function renderToolsCard() {
   const { isUnbinnedLabel } = window.ClannMAG.binReconciliation;
   const rows = [...allBinTablesByTool.entries()]
     .map(([tool, assignments]) => {
@@ -1083,20 +1078,26 @@ function renderToolsSection() {
     })
     .join('');
 
-  body.innerHTML = `
-    <div class="hint">Exclude a tool to see how the reconciliation changes without it — useful when one tool's output looks unusually fragmented (high singleton-bin %). At least one tool must stay active.</div>
-    <table class="data-table">
-      <thead><tr>
-        <th>Tool</th>
-        <th title="Total contig rows this tool assigned to a bin">Contigs</th>
-        <th title="Distinct bins this tool produced">Bins</th>
-        <th title="Fraction of this tool's bins containing exactly one contig — high values suggest fragmented, low-signal output">Singleton bins</th>
-      </tr></thead>
-      <tbody>${rows}</tbody>
-    </table>
+  return `
+    <div class="card">
+      <h3>Binning tools</h3>
+      <div class="row-count">Exclude a tool to see how the reconciliation changes without it — useful when one tool's output looks unusually fragmented (high singleton-bin %). At least one tool must stay active.</div>
+      <table class="data-table">
+        <thead><tr>
+          <th>Tool</th>
+          <th title="Total contig rows this tool assigned to a bin">Contigs</th>
+          <th title="Distinct bins this tool produced">Bins</th>
+          <th title="Fraction of this tool's bins containing exactly one contig — high values suggest fragmented, low-signal output">Singleton bins</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
   `;
+}
 
-  body.querySelectorAll('.tool-active-checkbox').forEach((cb) => {
+/** Wires the Binning tools card's checkboxes — call after renderToolsCard()'s HTML is in the DOM. */
+function initToolsCard() {
+  document.querySelectorAll('.tool-active-checkbox').forEach((cb) => {
     cb.addEventListener('change', () => {
       const tool = cb.dataset.tool;
       if (!cb.checked && activeTools.size <= 1 && activeTools.has(tool)) {
@@ -1242,6 +1243,7 @@ function renderFilteredExplorer() {
   const rankedOutlierFlags = applyOutlierThresholds(outlierFlags, currentParams.outlier);
   const scopedOutlierFlags = neighborhoodContigIds ? rankedOutlierFlags.filter((f) => neighborhoodContigIds.has(f.contigId)) : [];
   const outlierCard = tools.length > 0 ? renderOutlierCard(scopedOutlierFlags, outlierMeta, selectedMagId) : '';
+  const toolsCard = (allBinTablesByTool && allBinTablesByTool.size > 0) ? renderToolsCard() : '';
 
   explorer.innerHTML = `
     <div class="card">
@@ -1253,6 +1255,7 @@ function renderFilteredExplorer() {
       <div class="row"><label>Contigs with marker genes</label><strong>${contigsWithMarkers.toLocaleString()}</strong></div>
       <div class="row"><label>Distinct marker families hit</label><strong>${distinctFamiliesHit} / 40</strong></div>
     </div>
+    ${toolsCard}
     ${reconciliationCard}
     ${outlierCard}
     ${tools.length > 0 ? '<div class="card" id="export-card"></div>' : ''}
@@ -1270,6 +1273,7 @@ function renderFilteredExplorer() {
     </div>
   `;
 
+  if (toolsCard) initToolsCard();
   if (reconciliationResult) initMagNetwork(reconciliationResult, neighborhood, records);
   if (tools.length > 0) initExportSection();
 }
@@ -1359,7 +1363,6 @@ async function renderContigTable(records, binTablesByTool) {
   renderFiltersSection();
   renderMagFiltersSection();
   renderParamsSection();
-  renderToolsSection();
   renderFilteredExplorer();
 }
 
