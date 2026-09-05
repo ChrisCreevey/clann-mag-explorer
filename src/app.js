@@ -1607,7 +1607,7 @@ async function bestAttemptMatchBinTables(assemblyFile, binTablesByTool) {
     if (report.applied) {
       notices.push({
         tool, level: 'fixed',
-        message: `${tool}: contig IDs used the ${report.patternLabel}; stripped automatically `
+        message: `${tool}: table used ${report.patternLabel}; corrected automatically `
           + `(${(report.matchRateBefore * 100).toFixed(0)}% → ${(report.matchRateAfter * 100).toFixed(0)}% matched the assembly)`
           + `${report.collapsedCount ? `, ${report.collapsedCount.toLocaleString()} split contig(s) merged back via majority vote across their parts` : ''}.`,
       });

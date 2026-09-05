@@ -6,15 +6,17 @@
 // clustering (CONCOCT's default `cut_up_fasta.py` step splits every
 // contig into fixed-length chunks and clusters those, producing IDs like
 // `<contig>.concoct_part_0`, `.concoct_part_1`, ... instead of the
-// original contig ID), which otherwise makes every one of that tool's
-// rows silently fail to match the assembly — not because it was run
-// against a different assembly, but because of a well-known, mechanical
-// naming convention. This module detects that specific case (and is
-// structured to add more known conventions later) and, only when
-// stripping a known suffix recovers a high match rate, rewrites the
-// table's contig IDs and collapses any contig that split into multiple
-// rows back into one (majority vote across its parts' bin calls, ties
-// broken by first-seen order for determinism).
+// original contig ID), and some write their columns in the opposite
+// order this app assumes (VAMB's native cluster output is
+// clustername\tcontigname, not this app's assumed contig\tbin) — both of
+// which otherwise make every one of that tool's rows silently fail to
+// match the assembly, not because it was run against a different
+// assembly, but because of a well-known, mechanical format quirk. This
+// module detects both cases (and is structured to add more known
+// conventions later) and, only when a candidate fix recovers a high
+// match rate, rewrites the table's contig IDs and collapses any contig
+// that split into multiple rows back into one (majority vote across its
+// parts' bin calls, ties broken by first-seen order for determinism).
 //
 // If NO known convention gets the match rate high, that's the genuine
 // "this table doesn't belong to this assembly" signal the brief's
@@ -81,21 +83,53 @@ function bestAttemptRemapAssignments(assignments, referenceContigIds) {
     };
   }
 
+  // Each candidate below is {strategy, rate, patternLabel, buildAssignments()}
+  // — same shape regardless of which recovery it represents, so they can
+  // all compete on `rate` and the best one wins, same principle as picking
+  // the best-scoring reciprocal match elsewhere in this app.
   let best = null;
+
   for (const pattern of KNOWN_SUFFIX_PATTERNS) {
     const strippedIds = originalIds.map((id) => id.replace(pattern.regex, ''));
     const rate = matchRate(strippedIds, referenceContigIds);
-    if (rate > matchRateBefore && (!best || rate > best.rate)) best = { pattern, rate, strippedIds };
+    if (rate > matchRateBefore && (!best || rate > best.rate)) {
+      best = {
+        strategy: pattern.name, rate, patternLabel: pattern.label,
+        buildAssignments: () => assignments.map((a, i) => ({ contigId: strippedIds[i], binId: a.binId })),
+      };
+    }
+  }
+
+  // Some tools write bin\tcontig rather than this app's assumed
+  // contig\tbin — VAMB's native cluster output (clustername, contigname),
+  // notably, the exact reverse of DAS_Tool's Fasta_to_Contig2Bin.sh
+  // convention everything here is otherwise built around. Parsed the
+  // wrong way round, every real contig ID lands in the *binId* field, so
+  // each becomes its own one-contig "bin" that can never reciprocal-match
+  // anything — a real, confusing symptom this shipped with: that tool
+  // showing zero contribution to every putative MAG, and every contig it
+  // touches counted "disputed" purely because its phantom singleton bins
+  // never agree with anyone. Detected the same content-based way as every
+  // other strategy here: if reading the *second* column as the contig ID
+  // recovers a high match rate against the real assembly, the columns are
+  // almost certainly swapped.
+  const swappedIds = assignments.map((a) => a.binId);
+  const swappedRate = matchRate(swappedIds, referenceContigIds);
+  if (swappedRate > matchRateBefore && (!best || swappedRate > best.rate)) {
+    best = {
+      strategy: 'swapped-columns', rate: swappedRate,
+      patternLabel: 'bin→contig column order (e.g. VAMB’s native cluster output), not contig→bin',
+      buildAssignments: () => assignments.map((a) => ({ contigId: a.binId, binId: a.contigId })),
+    };
   }
 
   if (best && best.rate >= HIGH_MATCH_THRESHOLD) {
-    const stripped = assignments.map((a, i) => ({ contigId: best.strippedIds[i], binId: a.binId }));
-    const { assignments: collapsed, collapsedCount } = collapseByMajorityVote(stripped);
+    const { assignments: collapsed, collapsedCount } = collapseByMajorityVote(best.buildAssignments());
     return {
       assignments: collapsed,
       report: {
-        strategy: best.pattern.name, applied: true,
-        matchRateBefore, matchRateAfter: best.rate, collapsedCount, patternLabel: best.pattern.label,
+        strategy: best.strategy, applied: true,
+        matchRateBefore, matchRateAfter: best.rate, collapsedCount, patternLabel: best.patternLabel,
       },
     };
   }
