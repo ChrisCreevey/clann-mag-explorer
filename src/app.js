@@ -121,6 +121,26 @@ function defaultGlobalParams() {
 }
 let currentParams = null;
 
+// The complete set of loaded contig->bin tables, exactly as parsed — never
+// filtered — alongside which of those tools are currently "active"
+// (included in reconciliation). `latest.binTablesByTool` (built by
+// recomputeLatest) is always the *active subset* of this; keeping the full
+// map separately is what lets a student re-enable an excluded tool without
+// re-uploading it. Both reset on every fresh assembly load, `activeTools`
+// to every loaded tool (nothing excluded by default).
+let allBinTablesByTool = null;
+let activeTools = new Set();
+
+/** The active-only view of allBinTablesByTool that recomputeLatest should run on. */
+function filterActiveBinTables() {
+  if (!allBinTablesByTool) return null;
+  const filtered = new Map();
+  for (const [tool, assignments] of allBinTablesByTool) {
+    if (activeTools.has(tool)) filtered.set(tool, assignments);
+  }
+  return filtered.size ? filtered : null;
+}
+
 // Persists the reconciliation network's chosen layout algorithm across
 // filter-triggered re-renders (which rebuild the network's DOM each time —
 // see renderFilteredExplorer), same reasoning as workingAssignmentInitialized
@@ -990,6 +1010,105 @@ function renderMagFiltersSection() {
 }
 
 /**
+ * Excludes/re-includes one tool from cross-tool reconciliation — the
+ * mechanism the "Binning tools" section exposes for a tool whose output
+ * looks unreliable (a real dataset surfaced this: a tool whose bins were
+ * ~99% singletons dragged completeness/agreement toward zero everywhere
+ * it had an opinion, purely by disagreeing with everyone else almost at
+ * random). Refuses to drop the last active tool — reconciliation needs
+ * at least one — rather than leaving every bin-derived view empty with
+ * no obvious way back. Session state that depends on *which* MAGs exist
+ * (selection, decisions, the working assignment) is reset, same as a
+ * fresh load: which putative MAGs even exist can change completely once
+ * a tool's votes are added or removed, so anything referencing the old
+ * MAG IDs would silently point at the wrong (or a nonexistent) thing.
+ */
+function setToolActive(tool, active) {
+  if (!active && activeTools.size <= 1 && activeTools.has(tool)) return;
+  if (active) activeTools.add(tool); else activeTools.delete(tool);
+
+  selectedMagId = null;
+  selectedContigId = null;
+  decidedContigIds = new Set();
+  workingAssignmentInitialized = false;
+  networkAlgorithm = 'ring';
+
+  recomputeLatest(latest.records, filterActiveBinTables()).then(() => {
+    renderToolsSection();
+    renderMagFiltersSection();
+    renderFiltersSection();
+    renderFilteredExplorer();
+  });
+}
+
+/**
+ * Renders the "Binning tools" left-pane section (index.html's previously
+ * unwired #toolsSectionBody stub) — per-tool bin/contig counts and,
+ * specifically, each tool's singleton-bin fraction, the single number
+ * that would have flagged a real fragmented-tool problem immediately
+ * rather than needing to be root-caused through the network view three
+ * layers downstream. Always lists every *loaded* tool (allBinTablesByTool),
+ * not just the active ones, so excluding a tool doesn't remove the only
+ * way to re-include it.
+ */
+function renderToolsSection() {
+  const body = document.getElementById('toolsSectionBody');
+  if (!body) return;
+  if (!allBinTablesByTool || allBinTablesByTool.size === 0) {
+    body.innerHTML = '<div class="hint">Load one or more contig&rarr;bin tables to see per-tool stats here.</div>';
+    return;
+  }
+
+  const { isUnbinnedLabel } = window.ClannMAG.binReconciliation;
+  const rows = [...allBinTablesByTool.entries()]
+    .map(([tool, assignments]) => {
+      const binSizes = new Map();
+      for (const { binId } of assignments) {
+        if (isUnbinnedLabel(binId)) continue;
+        binSizes.set(binId, (binSizes.get(binId) || 0) + 1);
+      }
+      const binCount = binSizes.size;
+      const singletonCount = [...binSizes.values()].filter((n) => n === 1).length;
+      const singletonPct = binCount ? (singletonCount / binCount) * 100 : 0;
+      const isActive = activeTools.has(tool);
+      const warn = singletonPct >= 50
+        ? ' <span class="hint" title="More than half of this tool\'s bins contain only one contig — its votes may add more noise than signal to the reconciliation">&#9888;</span>'
+        : '';
+      return `<tr class="${isActive ? '' : 'tool-row-inactive'}">
+        <td><label><input type="checkbox" class="tool-active-checkbox" data-tool="${tool}" ${isActive ? 'checked' : ''}> ${tool}</label></td>
+        <td class="num">${assignments.length.toLocaleString()}</td>
+        <td class="num">${binCount.toLocaleString()}</td>
+        <td class="num">${singletonPct.toFixed(0)}%${warn}</td>
+      </tr>`;
+    })
+    .join('');
+
+  body.innerHTML = `
+    <div class="hint">Exclude a tool to see how the reconciliation changes without it — useful when one tool's output looks unusually fragmented (high singleton-bin %). At least one tool must stay active.</div>
+    <table class="data-table">
+      <thead><tr>
+        <th>Tool</th>
+        <th title="Total contig rows this tool assigned to a bin">Contigs</th>
+        <th title="Distinct bins this tool produced">Bins</th>
+        <th title="Fraction of this tool's bins containing exactly one contig — high values suggest fragmented, low-signal output">Singleton bins</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+  `;
+
+  body.querySelectorAll('.tool-active-checkbox').forEach((cb) => {
+    cb.addEventListener('change', () => {
+      const tool = cb.dataset.tool;
+      if (!cb.checked && activeTools.size <= 1 && activeTools.has(tool)) {
+        cb.checked = true; // refuse — reconciliation needs at least one active tool
+        return;
+      }
+      setToolActive(tool, cb.checked);
+    });
+  });
+}
+
+/**
  * Renders the Thresholds & parameters UI into #paramsSectionBody: every
  * global cutoff a student might want to see the effect of moving (MIMAG
  * quality-tier thresholds, the cross-tool bin-matching overlap threshold,
@@ -1229,8 +1348,10 @@ async function renderContigTable(records, binTablesByTool) {
   currentParams = defaultGlobalParams();
   currentMagFilters = window.ClannMAG.magFilters.defaultMagFilters();
   currentFilters = window.ClannMAG.filters.defaultFilters();
+  allBinTablesByTool = binTablesByTool;
+  activeTools = new Set(binTablesByTool ? binTablesByTool.keys() : []);
 
-  await recomputeLatest(records, binTablesByTool);
+  await recomputeLatest(records, filterActiveBinTables());
 
   document.getElementById('empty').style.display = 'none';
   document.getElementById('explorer').style.display = 'flex';
@@ -1238,6 +1359,7 @@ async function renderContigTable(records, binTablesByTool) {
   renderFiltersSection();
   renderMagFiltersSection();
   renderParamsSection();
+  renderToolsSection();
   renderFilteredExplorer();
 }
 

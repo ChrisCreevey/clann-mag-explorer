@@ -206,6 +206,9 @@ main > *, #wrap, #explorer, .card{min-width:0}
 
 /* ---- MAG picker table (cross-tool reconciliation card) ---- */
 .mag-picker-row-selected{background:color-mix(in srgb, var(--accent) 12%, transparent)}
+
+/* ---- Binning tools section (left pane) ---- */
+.tool-row-inactive{opacity:.5}
 .mag-picker-select{width:auto;padding:2px 9px;font-family:var(--font-mono);font-size:11.5px}
 
 /* ---- Contig evidence panel (click a contig in the network) ---- */
