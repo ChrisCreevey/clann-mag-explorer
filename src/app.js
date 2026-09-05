@@ -576,6 +576,7 @@ function renderContigEvidence(contigId, result, records) {
   const { computeMarkerContributions } = window.ClannMAG.binSummary;
   const { reassignContigs } = window.ClannMAG.workingAssignment;
   const magsById = new Map(result.putativeMags.map((m) => [m.magId, m]));
+  const tools = result.tools;
 
   const candidateMagIds = [...new Set(Object.values(entry.votes).filter(Boolean))].filter((id) => magsById.has(id));
   const currentDecision = workingAssignment.get(contigId) || null;
@@ -614,9 +615,24 @@ function renderContigEvidence(contigId, result, records) {
           })
           .join(' ');
 
+      // One column per loaded tool showing *that tool's own bin ID* if its
+      // vote for this contig landed in this MAG, blank otherwise — not a
+      // flattened text list (mag.members already carries the tool->binId
+      // mapping; entry.votes says which MAG each tool actually voted for,
+      // so a blank cell here means that tool voted elsewhere or had no
+      // opinion, not that data is missing).
+      const toolCells = tools
+        .map((tool) => {
+          if (entry.votes[tool] !== magId) return '<td class="hint">—</td>';
+          const member = mag.members.find((m) => m.tool === tool);
+          return `<td>${member ? member.binId : ''}</td>`;
+        })
+        .join('');
+
       const isCurrent = currentDecision === magId;
       return `<tr class="${isCurrent ? 'evidence-row-current' : ''}">
-        <td>${magId} <span class="hint">(${mag.members.map((m) => `${m.tool}:${m.binId}`).join(', ')})</span></td>
+        <td>${magId}</td>
+        ${toolCells}
         <td class="num">${meanGc === null ? '<span class="hint">n/a</span>' : `${meanGc.toFixed(1)}%`}</td>
         <td class="num">${gcDiff === null ? '<span class="hint">n/a</span>' : `${gcDiff > 0 ? '+' : ''}${gcDiff.toFixed(1)}pp`}</td>
         <td class="num">${meanCov === null ? '<span class="hint">n/a</span>' : meanCov.toFixed(1)}</td>
@@ -641,6 +657,7 @@ function renderContigEvidence(contigId, result, records) {
         <table class="data-table">
           <thead><tr>
             <th>Candidate MAG</th>
+            ${tools.map((t) => `<th title="This tool's own bin ID, if it voted this contig into this MAG">${t}</th>`).join('')}
             <th title="Mean GC% of this MAG's other core (unanimous-agreement) contigs">MAG mean GC</th>
             <th title="This contig's GC% minus the MAG's mean core GC%">GC diff</th>
             <th title="Mean coverage depth of this MAG's other core contigs">MAG mean cov.</th>

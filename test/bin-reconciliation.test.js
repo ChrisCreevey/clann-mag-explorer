@@ -177,6 +177,41 @@ test('two MAGs tied at the top still leaves majorityMagId null even with a third
   assert.strictEqual(c1.majorityMagId, null, '2-2-1 has no single leader, even though one MAG clearly trails');
 });
 
+test('two bins from the same tool never end up as members of the same putative MAG, even via transitive chaining', () => {
+  // A real bug found on real multi-tool data: toolA.bin1 and toolA.bin2 are
+  // never directly compared (findMutualBestMatchEdges skips same-tool
+  // pairs), but each separately reciprocal-matches a different bin from an
+  // intermediate tool, and *those* intermediate bins reciprocal-match each
+  // other too — a chain bin1-binX-binY-bin2 where the two ends are the
+  // same tool. Naive union-find closure merges the whole chain into one
+  // group, silently declaring toolA.bin1 and toolA.bin2 "the same MAG"
+  // even though toolA itself called them different bins.
+  const toolA = assignments([
+    ['link1', 'bin1'], ['p1a', 'bin1'], ['p1b', 'bin1'], ['p1c', 'bin1'],
+    ['link3', 'bin2'], ['p2a', 'bin2'], ['p2b', 'bin2'], ['p2c', 'bin2'],
+  ]);
+  const toolB = assignments([
+    ['link1', 'binX'], ['link2', 'binX'], ['pXa', 'binX'], ['pXb', 'binX'],
+  ]);
+  const toolC = assignments([
+    ['link2', 'binY'], ['link3', 'binY'], ['pYa', 'binY'], ['pYb', 'binY'],
+  ]);
+  const result = reconcileBins(new Map([['toolA', toolA], ['toolB', toolB], ['toolC', toolC]]));
+
+  for (const mag of result.putativeMags) {
+    const toolCounts = new Map();
+    for (const m of mag.members) toolCounts.set(m.tool, (toolCounts.get(m.tool) || 0) + 1);
+    for (const [tool, count] of toolCounts) {
+      assert.strictEqual(count, 1, `${mag.magId} should have at most one bin from ${tool}, got ${count}`);
+    }
+  }
+
+  const magOfBin1 = result.putativeMags.find((m) => m.members.some((mem) => mem.tool === 'toolA' && mem.binId === 'bin1'));
+  const magOfBin2 = result.putativeMags.find((m) => m.members.some((mem) => mem.tool === 'toolA' && mem.binId === 'bin2'));
+  assert.ok(magOfBin1 && magOfBin2, 'both toolA bins should still surface somewhere');
+  assert.notStrictEqual(magOfBin1.magId, magOfBin2.magId, 'bin1 and bin2 (same tool) must not be merged into one MAG');
+});
+
 test('minJaccard option controls how loose an overlap still counts as a match', () => {
   // bin.1 (toolA) and A (toolB) share only 1 of 4 contigs each -> low overlap
   const toolA = assignments([['c1', 'bin.1'], ['c2', 'bin.1'], ['c3', 'bin.1'], ['c4', 'bin.1']]);
