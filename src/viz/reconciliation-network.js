@@ -12,10 +12,23 @@
 //
 // Each leaf carries a `state` (app.js's buildMagNeighborhood): 'core' (only
 // ever voted into one shown MAG — nothing to decide, drawn smaller/dimmer),
-// 'disputed' (2+ shown MAGs, no decision made yet), 'resolved' (2+ shown
-// MAGs, the student assigned it via the evidence panel), or 'excluded'
-// (removed from consideration entirely) — see the .network-leaf-* classes
-// in styles/main.css.
+// 'tied' (2+ shown MAGs, no single majority winner among the tools that
+// voted at all — drawn largest/brightest, since there is no default
+// standing in for a decision here), 'disputed' (2+ shown MAGs, one has a
+// clear majority but the student hasn't confirmed it), 'resolved' (2+
+// shown MAGs, the student assigned it via the evidence panel), or
+// 'excluded' (removed from consideration entirely) — see the
+// .network-leaf-* classes in styles/main.css.
+//
+// A clicked leaf stays highlighted (its edges at full opacity, its circle
+// ringed via .network-leaf-selected) after the mouse leaves, tracked
+// internally as `pinnedLeafId` — this is what's currently open in the
+// evidence panel below, so the network should keep pointing at it rather
+// than reverting to the unhighlighted state the instant the pointer
+// moves. Hovering a different node still previews *its* edges on top
+// (mouseenter/mouseleave), reverting to the pin, not to nothing, once the
+// hover ends. `options.selectedLeafId` seeds the pin so it survives a
+// rebuild (app.js re-renders this whole network on most state changes).
 //
 // Draggable, asymmetrically: dragging a MAG hub is "move this genome and
 // everything currently blamed on it", so its connected leaves are dragged
@@ -34,10 +47,14 @@ const HUES = [200, 20, 150, 280, 50, 320, 100, 250, 0, 170];
 /**
  * @param {HTMLElement} container
  * @param {{hubs:{id:string,label:string}[],
- *           leaves:{id:string,hubIds:string[],state?:'core'|'disputed'|'resolved'|'excluded'}[],
+ *           leaves:{id:string,hubIds:string[],state?:'core'|'tied'|'disputed'|'resolved'|'excluded'}[],
  *           edges:{leafId:string,hubId:string,tool:string}[]}} data
  * @param {{width?:number, height?:number, algorithm?: 'ring'|'petal'|'force',
- *           onLeafClick?: (leafId:string)=>void, onHubClick?: (hubId:string)=>void}} options
+ *           centralHubId?: string, selectedLeafId?: string|null,
+ *           onLeafClick?: (leafId:string)=>void, onHubClick?: (hubId:string)=>void}} options -
+ *           centralHubId is the selected MAG (app.js), used by the 'ring' algorithm
+ *           (network-geometry.js's layoutCentricRing) to put it at the canvas centre;
+ *           ignored by 'petal'/'force'.
  */
 function createReconciliationNetwork(container, data, options = {}) {
   const { layoutNetwork } = self.ClannMAG.networkGeometry;
@@ -72,7 +89,7 @@ function createReconciliationNetwork(container, data, options = {}) {
   wrap.appendChild(legend);
   container.appendChild(wrap);
 
-  const { hubPositions, leafPositions } = layoutNetwork(algorithm, hubs.map((h) => h.id), leaves, { width, height });
+  const { hubPositions, leafPositions } = layoutNetwork(algorithm, hubs.map((h) => h.id), leaves, { width, height, centralHubId: options.centralHubId });
 
   const edgesGroup = document.createElementNS(SVG_NS, 'g');
   const hubsGroup = document.createElementNS(SVG_NS, 'g');
@@ -102,11 +119,36 @@ function createReconciliationNetwork(container, data, options = {}) {
     edgesByHub.get(edge.hubId).push(line);
   }
 
-  function setHighlight(activeLines) {
-    const active = new Set(activeLines || []);
+  // Hover previews on top of a persistent click-pin — see the header
+  // comment above for why these are two separate, layered states rather
+  // than one. `hoveredLeafOrHubId` is transient (cleared on mouseleave);
+  // `pinnedLeafId` persists until a different leaf is clicked or the
+  // network is rebuilt with a different (or no) `options.selectedLeafId`.
+  let hoveredLeafOrHubId = null;
+  let pinnedLeafId = options.selectedLeafId || null;
+
+  function activeEdgeLines() {
+    if (hoveredLeafOrHubId) return edgesByLeaf.get(hoveredLeafOrHubId) || edgesByHub.get(hoveredLeafOrHubId);
+    if (pinnedLeafId) return edgesByLeaf.get(pinnedLeafId);
+    return null;
+  }
+
+  function refreshHighlight() {
+    const active = new Set(activeEdgeLines() || []);
     edgesGroup.querySelectorAll('line').forEach((line) => {
       line.setAttribute('opacity', active.size === 0 ? '0.45' : active.has(line) ? '0.9' : '0.08');
     });
+    for (const [id, el] of leafEls) el.circle.classList.toggle('network-leaf-selected', id === pinnedLeafId);
+  }
+
+  function setHover(id) {
+    hoveredLeafOrHubId = id;
+    refreshHighlight();
+  }
+
+  function pinLeaf(leafId) {
+    pinnedLeafId = leafId;
+    refreshHighlight();
   }
 
   function setHubPosition(hubId, x, y) {
@@ -181,8 +223,8 @@ function createReconciliationNetwork(container, data, options = {}) {
     label.setAttribute('class', 'network-hub-label');
     label.textContent = hub.label;
     g.append(circle, label);
-    g.addEventListener('mouseenter', () => setHighlight(edgesByHub.get(hub.id)));
-    g.addEventListener('mouseleave', () => setHighlight(null));
+    g.addEventListener('mouseenter', () => setHover(hub.id));
+    g.addEventListener('mouseleave', () => setHover(null));
     if (options.onHubClick) g.addEventListener('click', () => options.onHubClick(hub.id));
     const title = document.createElementNS(SVG_NS, 'title');
     title.textContent = `${hub.label} — ${(edgesByHub.get(hub.id) || []).length} vote(s) shown. Drag to move it with its contigs.${options.onHubClick ? ' Click to explore its own neighborhood.' : ''}`;
@@ -192,9 +234,12 @@ function createReconciliationNetwork(container, data, options = {}) {
   }
 
   const LEAF_STATE_LABELS = {
-    core: 'unanimous core contig', disputed: 'disputed — needs a decision',
+    core: 'unanimous core contig',
+    tied: 'tied — no majority vote at all, your call',
+    disputed: 'disputed — one MAG leads the vote, not yet confirmed',
     resolved: 'resolved by you', excluded: 'excluded by you',
   };
+  const LEAF_STATE_RADIUS = { core: 2.5, tied: 4.5, disputed: 3.5, resolved: 3.5, excluded: 3.5 };
   const leafEls = new Map();
   for (const leaf of leaves) {
     const p = leafPositions.get(leaf.id);
@@ -202,18 +247,24 @@ function createReconciliationNetwork(container, data, options = {}) {
     const state = leaf.state || 'disputed';
     const g = document.createElementNS(SVG_NS, 'g');
     const circle = document.createElementNS(SVG_NS, 'circle');
-    circle.setAttribute('cx', p.x); circle.setAttribute('cy', p.y); circle.setAttribute('r', state === 'core' ? '2.5' : '3.5');
+    circle.setAttribute('cx', p.x); circle.setAttribute('cy', p.y); circle.setAttribute('r', String(LEAF_STATE_RADIUS[state] ?? 3.5));
     circle.setAttribute('class', `network-leaf network-leaf-${state}`);
     g.appendChild(circle);
-    g.addEventListener('mouseenter', () => setHighlight(edgesByLeaf.get(leaf.id)));
-    g.addEventListener('mouseleave', () => setHighlight(null));
-    if (options.onLeafClick) g.addEventListener('click', () => options.onLeafClick(leaf.id));
+    g.addEventListener('mouseenter', () => setHover(leaf.id));
+    g.addEventListener('mouseleave', () => setHover(null));
+    if (options.onLeafClick) {
+      g.addEventListener('click', () => {
+        pinLeaf(leaf.id);
+        options.onLeafClick(leaf.id);
+      });
+    }
     const title = document.createElementNS(SVG_NS, 'title');
-    title.textContent = `${leaf.id} (${LEAF_STATE_LABELS[state]}) — voted into ${leaf.hubIds.length} MAG(s) across tools. Drag to move just this contig.${options.onLeafClick ? ' Click to compare evidence.' : ''}`;
+    title.textContent = `${leaf.id} (${LEAF_STATE_LABELS[state]}) — voted into ${leaf.hubIds.length} MAG(s) across tools. Drag to move just this contig.${options.onLeafClick ? ' Click to compare evidence — stays highlighted.' : ''}`;
     g.appendChild(title);
     leavesGroup.appendChild(g);
     leafEls.set(leaf.id, { g, circle });
   }
+  refreshHighlight(); // applies the initial pin (options.selectedLeafId) now that leafEls exists
 
   // Wire dragging after all elements exist, since a hub's drag needs to
   // look up its connected leaves' *current* positions at drag-start time

@@ -183,11 +183,23 @@ main > *, #wrap, #explorer, .card{min-width:0}
 .network-hub-label{fill:var(--ink);font-size:10px;font-family:var(--font-mono)}
 .network-leaf{stroke:var(--bg);stroke-width:0.6;cursor:pointer}
 .network-leaf-core{fill:var(--muted);opacity:.55}
+/* Tied — no majority vote winner at all, no default assignment exists —
+   is the most attention-grabbing state: brightest fill, thickest ink
+   stroke, and the largest radius (set in reconciliation-network.js), so
+   it reads as "unresolved and needs you" at a glance, distinct from a
+   disputed contig that at least has a leaning majority. */
+.network-leaf-tied{fill:var(--amber-500);stroke:var(--ink);stroke-width:1.8}
+:root[data-theme="dark"] .network-leaf-tied{fill:var(--amber-400)}
 .network-leaf-disputed{fill:var(--clay-500);opacity:.9}
 :root[data-theme="dark"] .network-leaf-disputed{fill:var(--clay-400)}
 .network-leaf-resolved{fill:var(--moss-500);stroke:var(--moss-500);stroke-width:1.4}
 :root[data-theme="dark"] .network-leaf-resolved{fill:var(--moss-300);stroke:var(--moss-300)}
 .network-leaf-excluded{fill:var(--line);opacity:.6;stroke-dasharray:1.5,1}
+/* Persistent click-selection ring (reconciliation-network.js's pinnedLeafId)
+   — layered on top of whichever state class is also present; declared
+   after every .network-leaf-* rule above so its stroke wins the cascade
+   for that property while the state's own fill still shows through. */
+.network-leaf-selected{stroke:var(--accent);stroke-width:2.4px}
 .network-legend{display:flex;flex-wrap:wrap;gap:10px 14px;margin-top:6px;font-size:11.5px;color:var(--muted)}
 .network-legend-item{display:inline-flex;align-items:center;gap:5px}
 .network-swatch{width:9px;height:9px;border-radius:2px;display:inline-block}

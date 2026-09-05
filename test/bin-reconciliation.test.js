@@ -112,6 +112,71 @@ test('three tools: majority-of-two-vs-one is still a disputed contig, not core',
   assert.strictEqual(c2.agreementFraction, 1, 'c2: all 3 tools agree');
 });
 
+// Each vote-count scenario below pads its bins with enough unique,
+// unshared contigs that the *bins* casting rival votes for the contested
+// contig don't reciprocal-match (and merge into one MAG) themselves —
+// otherwise the tie evaporates before the vote is ever tallied, since bin
+// matching runs before per-contig votes are counted. This is the same
+// trap HANDOVER.md documents from Phase 5: a naively-built "disagreement"
+// scenario can accidentally test agreement instead once bins merge.
+function padded(binId, contigId, padPrefix, padCount = 9) {
+  return assignments([[contigId, binId], ...Array.from({ length: padCount }, (_, i) => [`${padPrefix}${i}`, binId])]);
+}
+
+test('a genuine tie for the top vote count leaves majorityMagId null, not defaulting to whichever MAG was counted first', () => {
+  // toolA and toolB each vote for a different, non-reciprocal-matching bin
+  // for c1 (a plain 1-1 split) — no third tool to break the tie, so
+  // neither MAG has a real majority.
+  const toolA = padded('binA', 'c1', 'padA');
+  const toolB = padded('binB', 'c1', 'padB');
+  const result = reconcileBins(new Map([['toolA', toolA], ['toolB', toolB]]));
+
+  assert.strictEqual(result.putativeMags.length, 2, 'binA and binB should stay distinct putative MAGs (overlap only at c1, well below minJaccard)');
+  const c1 = result.contigAgreement.find((c) => c.contigId === 'c1');
+  assert.strictEqual(c1.totalVotes, 2);
+  assert.strictEqual(c1.majorityMagId, null, 'a 1-1 split has no majority winner');
+  assert.strictEqual(c1.agreementFraction, 0.5);
+
+  for (const mag of result.putativeMags) {
+    assert.ok(!mag.coreContigIds.includes('c1'), 'a tied contig belongs to no MAG\'s core set');
+    assert.ok(!mag.disputedContigIds.includes('c1'), 'a tied contig belongs to no MAG\'s disputed set either');
+  }
+});
+
+test('a three-way tie (three tools, three different MAGs) also leaves majorityMagId null', () => {
+  const toolA = padded('A', 'c1', 'padA');
+  const toolB = padded('B', 'c1', 'padB');
+  const toolC = padded('C', 'c1', 'padC');
+  const result = reconcileBins(new Map([['toolA', toolA], ['toolB', toolB], ['toolC', toolC]]));
+
+  assert.strictEqual(result.putativeMags.length, 3, 'all three bins should stay distinct putative MAGs');
+  const c1 = result.contigAgreement.find((c) => c.contigId === 'c1');
+  assert.strictEqual(c1.majorityMagId, null);
+  assert.strictEqual(c1.distinctGroupsVoted, 3);
+});
+
+test('two MAGs tied at the top still leaves majorityMagId null even with a third, lower vote-getter', () => {
+  // toolA/toolB fully agree on one bin (2 votes for it); toolC/toolD fully
+  // agree on a different, non-overlapping bin (2 votes for it); toolE
+  // votes alone for a third bin (1 vote). 2-2-1: no single leader.
+  const padP = Array.from({ length: 9 }, (_, i) => `p${i}`);
+  const padQ = Array.from({ length: 9 }, (_, i) => `q${i}`);
+  const padR = Array.from({ length: 9 }, (_, i) => `r${i}`);
+  const toolA = assignments([['c1', 'P1'], ...padP.map((p) => [p, 'P1'])]);
+  const toolB = assignments([['c1', 'P2'], ...padP.map((p) => [p, 'P2'])]); // identical contig set to toolA -> merges with it
+  const toolC = assignments([['c1', 'Q1'], ...padQ.map((p) => [p, 'Q1'])]);
+  const toolD = assignments([['c1', 'Q2'], ...padQ.map((p) => [p, 'Q2'])]); // identical contig set to toolC -> merges with it
+  const toolE = assignments([['c1', 'R1'], ...padR.map((p) => [p, 'R1'])]); // alone, singleton MAG
+
+  const result = reconcileBins(new Map([
+    ['toolA', toolA], ['toolB', toolB], ['toolC', toolC], ['toolD', toolD], ['toolE', toolE],
+  ]));
+
+  assert.strictEqual(result.putativeMags.length, 3, 'P, Q, and R should each stay distinct putative MAGs');
+  const c1 = result.contigAgreement.find((c) => c.contigId === 'c1');
+  assert.strictEqual(c1.majorityMagId, null, '2-2-1 has no single leader, even though one MAG clearly trails');
+});
+
 test('minJaccard option controls how loose an overlap still counts as a match', () => {
   // bin.1 (toolA) and A (toolB) share only 1 of 4 contigs each -> low overlap
   const toolA = assignments([['c1', 'bin.1'], ['c2', 'bin.1'], ['c3', 'bin.1'], ['c4', 'bin.1']]);

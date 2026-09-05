@@ -39,6 +39,17 @@ let workingAssignmentInitialized = false; // guards deriveInitialAssignment from
 let selectedMagId = null;
 let selectedContigId = null;
 
+// Network scope toggles, both default off: the network starts scoped to
+// just the selected MAG's *contended* contigs (the thing worth resolving)
+// plus the bare hubs of whatever else contends with them, not every
+// uncontended contig the primary MAG has and not every one of a secondary
+// MAG's own contigs — pulling in a secondary MAG's full contig set by
+// default turned out to be the wrong call (it buries the actual dispute
+// under everything else that MAG happens to contain), so both are now
+// explicit, off-by-default choices instead. Reset on every fresh load.
+let showUncontendedContigs = false;
+let showConnectedMagContigs = false;
+
 // Contigs the student has explicitly decided via the evidence panel's
 // "Assign here"/"Exclude" buttons — deliberately NOT the same thing as
 // "workingAssignment has an entry for this contig", since
@@ -306,8 +317,14 @@ function renderReconciliationCard(records, result, magSummaryData, filteredMagId
         </table>
       </div>
       <h4>Contig network</h4>
+      <div class="row"><label title="Off by default: only contended contigs (voted differently by at least one tool) show. Turn on to also show this MAG's uncontended contigs.">
+        <input type="checkbox" id="toggleUncontended" ${showUncontendedContigs ? 'checked' : ''}> Show uncontended contigs
+      </label></div>
+      <div class="row"><label title="Off by default: a connected MAG shows as a bare hub for its contended contigs only. Turn on to also show its entire contig set.">
+        <input type="checkbox" id="toggleConnectedMags" ${showConnectedMagContigs ? 'checked' : ''}> Show contigs for connected MAGs
+      </label></div>
       <div class="row"><label>Arrange</label><select id="networkAlgorithm">
-        <option value="ring">Ring</option>
+        <option value="ring">Ring (selected MAG centred)</option>
         <option value="petal">Petal (grouped by MAG)</option>
         <option value="force">Force-directed</option>
       </select></div>
@@ -320,13 +337,32 @@ function renderReconciliationCard(records, result, magSummaryData, filteredMagId
 
 /**
  * The primitive the redesigned network is built around: given a selected
- * MAG, its own full contig set (core + disputed), plus — for every one of
- * its disputed contigs — every *other* MAG any tool voted for instead,
- * each shown with its own full contig set too. One hop only, off the
- * selected MAG's own disputes; a secondary MAG's unrelated disputes with a
- * third MAG are not pulled in, so the neighborhood stays a bounded,
- * readable "this MAG and what it's contending with", not a recursive
- * expansion across the whole reconciliation graph.
+ * MAG, every *contended* contig any tool voted for it — not just the ones
+ * bin-reconciliation.js's majority-vote bookkeeping happened to assign it
+ * (mag.coreContigIds/disputedContigIds), which by construction excludes a
+ * genuinely tied contig (see bin-reconciliation.js's majorityMagId
+ * handling) from every MAG's list. Using the vote-based reverse index
+ * (latest.contigIdsByMagId) instead means a tied contig still shows up
+ * here, attached to every MAG it's tied between, rather than being
+ * invisible from all of them. Plus, for every *other* MAG any tool voted
+ * for instead of the selected one, on any of those contended contigs, that
+ * MAG appears as a hub too, so the contested vote is visible from both
+ * sides. One hop only, off the selected MAG's own contigs; a secondary
+ * MAG's unrelated disputes/ties with a third MAG are not pulled in, so the
+ * neighborhood stays a bounded, readable "this MAG and what it's
+ * contending with," not a recursive expansion across the whole
+ * reconciliation graph.
+ *
+ * Two things are deliberately left out unless asked for, via `opts`,
+ * since pulling them in by default buried the actual dispute under
+ * everything else nearby:
+ * - `showUncontendedContigs` (default false): the selected MAG's own
+ *   contigs that no tool disagreed on at all. Nothing to resolve there.
+ * - `showConnectedMagContigs` (default false): a secondary MAG's *entire*
+ *   contig set, not just the contended ones it shares with the selected
+ *   MAG. Off by default, a secondary MAG shows as a bare hub — present so
+ *   the contended vote has somewhere to point, without dragging in every
+ *   other contig that MAG happens to contain.
  *
  * A vote can name a MAG that lost every contig's majority vote and so was
  * dropped from result.putativeMags entirely (bin-reconciliation.js's
@@ -334,16 +370,22 @@ function renderReconciliationCard(records, result, magSummaryData, filteredMagId
  * everywhere below, so such a MAG never becomes a hub with no contigs to
  * back it, and edges never point at a hub that doesn't exist.
  *
+ * @param {{showUncontendedContigs?:boolean, showConnectedMagContigs?:boolean}} [opts]
  * @returns {{hubs, leaves, edges, truncated, totalContigs, allTotalContigs,
- *   secondaryCount}|null} null if selectedMagId no longer names a real MAG
+ *   secondaryCount, hiddenUncontendedCount, hiddenConnectedCount}|null}
+ *   null if selectedMagId no longer names a real MAG
  */
-function buildMagNeighborhood(selectedMagId, result) {
+function buildMagNeighborhood(selectedMagId, result, opts = {}) {
+  const includeUncontended = opts.showUncontendedContigs || false;
+  const includeConnected = opts.showConnectedMagContigs || false;
+
   const magsById = new Map(result.putativeMags.map((m) => [m.magId, m]));
-  const primary = magsById.get(selectedMagId);
-  if (!primary) return null;
+  if (!magsById.has(selectedMagId)) return null;
+
+  const primaryContigIds = latest.contigIdsByMagId.get(selectedMagId) || new Set();
 
   const secondaryMagIds = new Set();
-  for (const contigId of primary.disputedContigIds) {
+  for (const contigId of primaryContigIds) {
     const entry = latest.contigAgreementEntryByContigId.get(contigId);
     if (!entry) continue;
     for (const magId of Object.values(entry.votes)) {
@@ -354,8 +396,33 @@ function buildMagNeighborhood(selectedMagId, result) {
   const shownMagIds = new Set([selectedMagId, ...secondaryMagIds]);
   const shownMags = [...shownMagIds].map((id) => magsById.get(id));
 
+  // The selected MAG's own contigs: contended ones (entry.distinctGroupsVoted
+  // > 1 — bin-reconciliation.js's count of how many distinct MAGs got a vote
+  // for this contig) always show, since resolving contention is the point of
+  // this view; uncontended ones only show when that toggle is on.
   const contigIdSet = new Set();
-  for (const mag of shownMags) for (const id of [...mag.coreContigIds, ...mag.disputedContigIds]) contigIdSet.add(id);
+  let hiddenUncontendedCount = 0;
+  for (const contigId of primaryContigIds) {
+    const entry = latest.contigAgreementEntryByContigId.get(contigId);
+    const contended = entry && entry.distinctGroupsVoted > 1;
+    if (contended || includeUncontended) contigIdSet.add(contigId);
+    else hiddenUncontendedCount++;
+  }
+
+  // A secondary MAG's own full contig set only shows when that toggle is
+  // on — its contended contigs are already included above via the
+  // selected MAG's own scan, so this only ever adds contigs unrelated to
+  // the actual dispute.
+  let hiddenConnectedCount = 0;
+  for (const magId of secondaryMagIds) {
+    const magContigIds = latest.contigIdsByMagId.get(magId) || new Set();
+    for (const id of magContigIds) {
+      if (contigIdSet.has(id)) continue;
+      if (includeConnected) contigIdSet.add(id);
+      else hiddenConnectedCount++;
+    }
+  }
+
   const allContigIds = [...contigIdSet];
 
   const NODE_LIMIT = 300;
@@ -363,15 +430,19 @@ function buildMagNeighborhood(selectedMagId, result) {
   const truncated = allContigIds.length > NODE_LIMIT;
 
   // A leaf's state drives the network's colouring (reconciliation-network.js):
-  // 'core' (only ever voted into one shown MAG, nothing to decide), 'disputed'
-  // (2+ shown MAGs, no decision made yet), 'resolved' (2+ shown MAGs, the
-  // student has explicitly assigned it via the evidence panel), 'excluded'
-  // (the student explicitly removed it from both/all). "Explicitly" matters:
-  // workingAssignment already carries a majority-vote default for every
-  // voted contig from deriveInitialAssignment, including disputed ones, so
-  // decidedContigIds — populated only by the evidence panel's own
-  // buttons — is what actually distinguishes "still needs a look" from
-  // "you decided this," not merely "workingAssignment has an entry."
+  // 'core' (only ever voted into one shown MAG, nothing to decide), 'tied'
+  // (2+ shown MAGs, no single majority winner among the tools that voted —
+  // bin-reconciliation.js's majorityMagId is null, so there is no default
+  // to fall back on at all), 'disputed' (2+ shown MAGs, one has a clear
+  // majority but the student hasn't confirmed it), 'resolved' (2+ shown
+  // MAGs, the student has explicitly assigned it via the evidence panel),
+  // 'excluded' (the student explicitly removed it from both/all).
+  // "Explicitly" matters for resolved/excluded: workingAssignment already
+  // carries a majority-vote default for every non-tied voted contig from
+  // deriveInitialAssignment, so decidedContigIds — populated only by the
+  // evidence panel's own buttons — is what actually distinguishes "still
+  // needs a look" from "you decided this," not merely "workingAssignment
+  // has an entry."
   const leaves = [];
   const edges = [];
   for (const contigId of contigIds) {
@@ -382,8 +453,10 @@ function buildMagNeighborhood(selectedMagId, result) {
     const decided = decidedContigIds.has(contigId);
     let state;
     if (decided && workingAssignment.get(contigId) === EXCLUDED_BIN_ID) state = 'excluded';
-    else if (hubIds.length > 1) state = decided ? 'resolved' : 'disputed';
-    else state = 'core';
+    else if (hubIds.length === 1) state = 'core';
+    else if (decided) state = 'resolved';
+    else if (entry.majorityMagId === null) state = 'tied';
+    else state = 'disputed';
     leaves.push({ id: contigId, hubIds, state });
     for (const [tool, magId] of Object.entries(entry.votes)) {
       if (magId && shownMagIds.has(magId)) edges.push({ leafId: contigId, hubId: magId, tool });
@@ -395,6 +468,8 @@ function buildMagNeighborhood(selectedMagId, result) {
     hubs, leaves, edges, truncated,
     totalContigs: contigIds.length, allTotalContigs: allContigIds.length,
     secondaryCount: secondaryMagIds.size,
+    tiedCount: leaves.filter((l) => l.state === 'tied').length,
+    hiddenUncontendedCount, hiddenConnectedCount,
   };
 }
 
@@ -414,24 +489,40 @@ function initMagNetwork(result, neighborhood, records) {
   const note = document.getElementById('reconciliationNetworkNote');
   const evidenceContainer = document.getElementById('contigEvidence');
   const algorithmSelect = document.getElementById('networkAlgorithm');
+  const uncontendedToggle = document.getElementById('toggleUncontended');
+  const connectedToggle = document.getElementById('toggleConnectedMags');
   if (!container || !note) return;
 
+  // These three controls are rebuilt fresh (innerHTML) on every render, so
+  // there's nothing stale to guard against re-wiring — unlike a control
+  // that persists across renders, each one only ever gets wired once per
+  // element instance. All three trigger a full re-render on change, same
+  // as every other state toggle in this app (filters, params, MAG
+  // selection), so the network, the note text, and the evidence panel all
+  // stay consistent with whatever scope is now in effect.
   if (algorithmSelect) {
     algorithmSelect.value = networkAlgorithm;
-    // Guarded so repeated calls from the change handler itself (see below)
-    // don't stack a fresh listener on the same <select> element each time.
-    if (!algorithmSelect.dataset.wired) {
-      algorithmSelect.dataset.wired = '1';
-      algorithmSelect.addEventListener('change', () => {
-        networkAlgorithm = algorithmSelect.value;
-        renderFilteredExplorer();
-      });
-    }
+    algorithmSelect.addEventListener('change', () => {
+      networkAlgorithm = algorithmSelect.value;
+      renderFilteredExplorer();
+    });
+  }
+  if (uncontendedToggle) {
+    uncontendedToggle.addEventListener('change', () => {
+      showUncontendedContigs = uncontendedToggle.checked;
+      renderFilteredExplorer();
+    });
+  }
+  if (connectedToggle) {
+    connectedToggle.addEventListener('change', () => {
+      showConnectedMagContigs = connectedToggle.checked;
+      renderFilteredExplorer();
+    });
   }
 
   if (!selectedMagId || !neighborhood) {
     container.innerHTML = '';
-    note.textContent = 'Select a putative MAG above to see its contigs and any contested overlaps with other MAGs.';
+    note.textContent = 'Select a putative MAG above to see its contended contigs and any MAGs it contends with.';
     if (evidenceContainer) evidenceContainer.innerHTML = '';
     return;
   }
@@ -440,11 +531,14 @@ function initMagNetwork(result, neighborhood, records) {
     (neighborhood.secondaryCount > 0
       ? ` across ${neighborhood.hubs.length} MAG(s) (contending with ${neighborhood.secondaryCount})`
       : ', no contested overlaps with other MAGs') +
+    (neighborhood.tiedCount > 0 ? ` — ${neighborhood.tiedCount} tied, with no majority vote at all (bright ring)` : '') +
+    (neighborhood.hiddenUncontendedCount > 0 ? ` — ${neighborhood.hiddenUncontendedCount.toLocaleString()} uncontended contig(s) hidden, toggle above to show` : '') +
+    (neighborhood.hiddenConnectedCount > 0 ? ` — ${neighborhood.hiddenConnectedCount.toLocaleString()} more contig(s) available from connected MAGs, toggle above to show` : '') +
     (neighborhood.truncated ? ` — truncated from ${neighborhood.allTotalContigs.toLocaleString()} for readability, narrow with MAG filters` : '') +
-    '. Click a contig to compare evidence and decide where it belongs; click another MAG to explore its neighborhood.';
+    '. Click a contig to compare evidence and decide where it belongs (selection stays highlighted); click another MAG to explore its neighborhood.';
 
   createReconciliationNetwork(container, { hubs: neighborhood.hubs, leaves: neighborhood.leaves, edges: neighborhood.edges }, {
-    width: 680, height: 680, algorithm: networkAlgorithm,
+    width: 680, height: 680, algorithm: networkAlgorithm, centralHubId: selectedMagId, selectedLeafId: selectedContigId,
     onLeafClick: (leafId) => { selectedContigId = leafId; renderContigEvidence(leafId, result, records); },
     onHubClick: (hubId) => { selectedMagId = hubId; selectedContigId = null; renderFilteredExplorer(); },
   });
@@ -533,10 +627,16 @@ function renderContigEvidence(contigId, result, records) {
     })
     .join('');
 
+  const disputeNote = candidateMagIds.length <= 1
+    ? 'not contested — every voting tool agrees'
+    : entry.majorityMagId === null
+      ? `tied between ${candidateMagIds.length} MAGs across ${entry.totalVotes} tool vote(s) — no majority, this one's your call`
+      : `contested between ${candidateMagIds.length} MAGs across ${entry.totalVotes} tool vote(s) (${entry.majorityMagId} currently leads the vote)`;
+
   container.innerHTML = `
     <div class="card evidence-card">
       <h3>Contig ${contigId}</h3>
-      <div class="row-count">Length ${record.length.toLocaleString()} bp &middot; own GC ${contigGc.toFixed(1)}%${contigCov !== null ? ` &middot; own mean coverage ${contigCov.toFixed(1)}` : ''} &middot; ${candidateMagIds.length > 1 ? `contested between ${candidateMagIds.length} MAGs across ${entry.totalVotes} tool vote(s)` : 'not contested — every voting tool agrees'}</div>
+      <div class="row-count">Length ${record.length.toLocaleString()} bp &middot; own GC ${contigGc.toFixed(1)}%${contigCov !== null ? ` &middot; own mean coverage ${contigCov.toFixed(1)}` : ''} &middot; ${disputeNote}</div>
       <div class="table-wrap scroll-panel">
         <table class="data-table">
           <thead><tr>
@@ -970,7 +1070,9 @@ function renderFilteredExplorer() {
     ? renderReconciliationCard(records, reconciliationResult, magSummaryData, filteredMagIds)
     : '';
 
-  const neighborhood = (reconciliationResult && selectedMagId) ? buildMagNeighborhood(selectedMagId, reconciliationResult) : null;
+  const neighborhood = (reconciliationResult && selectedMagId)
+    ? buildMagNeighborhood(selectedMagId, reconciliationResult, { showUncontendedContigs, showConnectedMagContigs })
+    : null;
   const neighborhoodContigIds = neighborhood ? new Set(neighborhood.leaves.map((l) => l.id)) : null;
   const rankedOutlierFlags = applyOutlierThresholds(outlierFlags, currentParams.outlier);
   const scopedOutlierFlags = neighborhoodContigIds ? rankedOutlierFlags.filter((f) => neighborhoodContigIds.has(f.contigId)) : [];
@@ -1044,16 +1146,28 @@ async function recomputeLatest(records, binTablesByTool) {
   const binIndex = buildBinIndex(binTablesByTool);
   const agreementByContigId = new Map();
   const contigAgreementEntryByContigId = new Map();
+  // Reverse index: every contig that got *any* tool's vote for a given MAG,
+  // not just the ones bin-reconciliation.js's majority-vote bookkeeping
+  // happened to assign it (mag.coreContigIds/disputedContigIds) — that
+  // bookkeeping leaves a genuinely tied contig (no single majority winner)
+  // out of every MAG's list entirely, so buildMagNeighborhood needs this
+  // broader index to still find and display tied contigs when a MAG that
+  // was one of the tied contenders gets selected.
+  const contigIdsByMagId = new Map();
   if (reconciliationResult) {
     for (const c of reconciliationResult.contigAgreement) {
       agreementByContigId.set(c.contigId, c.agreementFraction);
       contigAgreementEntryByContigId.set(c.contigId, c);
+      for (const magId of new Set(Object.values(c.votes).filter(Boolean))) {
+        if (!contigIdsByMagId.has(magId)) contigIdsByMagId.set(magId, new Set());
+        contigIdsByMagId.get(magId).add(c.contigId);
+      }
     }
   }
 
   latest = {
     records, binTablesByTool, tools, reconciliationResult, outlierFlags, outlierMeta, binIndex,
-    agreementByContigId, contigAgreementEntryByContigId,
+    agreementByContigId, contigAgreementEntryByContigId, contigIdsByMagId,
   };
 }
 
@@ -1177,6 +1291,8 @@ function loadAssembly(file, binTablesByTool, coverageTable, krakenCalls) {
     networkAlgorithm = 'ring';
     selectedMagId = null;
     selectedContigId = null;
+    showUncontendedContigs = false;
+    showConnectedMagContigs = false;
     decidedContigIds = new Set();
 
     worker.onmessage = async (e) => {

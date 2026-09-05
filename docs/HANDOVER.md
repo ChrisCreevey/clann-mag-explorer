@@ -25,6 +25,23 @@ too many tables, no single clear workflow. The app was redesigned around one tas
 - The outlier/disagreement card is now scoped to whichever MAG is selected, not the whole assembly.
 - Left-pane MAG filters moved above contig filters — their job now is finding which MAG to select, which is the
   left pane's primary purpose post-redesign; contig filters only narrow the collapsed raw table.
+- **Fixed a real, pre-existing bug in `bin-reconciliation.js`'s majority-vote logic while testing the above**: a
+  genuine tie for the top vote count (e.g. a 1-1 split between two tools, with no reciprocal bin-match to merge
+  them) was silently defaulting to whichever MAG got counted first (`count > majorityCount`, not `>=`), even
+  though `working-assignment.js`'s own docstring already claimed ties were left unassigned. Now `majorityMagId`
+  is genuinely `null` on a tie (tracked via a `leaders` array, not a single running best), so a tied contig
+  belongs to no MAG's `coreContigIds`/`disputedContigIds` and gets no default in `deriveInitialAssignment` — it
+  shows up in the network as a new `'tied'` leaf state (amber, largest radius, distinct from `'disputed'`, which
+  still has a real if unconfirmed majority) and stays truly unassigned until the student picks. Verify a change
+  in this area in the browser, not just via `node test/run.js` — one of the original three tests I wrote for
+  this passed against buggy code because the bin-matching step (which runs *before* votes are tallied) had
+  already merged the two "rival" bins into one MAG, so the vote was never actually split. Caught it by testing
+  against the real `examples/marker-gene-demo.*` fixtures in-browser, not just synthetic unit tests.
+- The network's click-to-decide highlight (a leaf's edges + a `.network-leaf-selected` ring) now **persists**
+  after the mouse leaves, via `pinnedLeafId` in `reconciliation-network.js` — separate from the transient hover
+  preview, which still shows on top but reverts to the pin (not to nothing) once the hover ends. Seeded on
+  rebuild via `options.selectedLeafId` (app.js passes `selectedContigId`), so it survives the full re-render a
+  decision triggers.
 
 None of the phase-by-phase history below was rewritten to match — read it as "how each underlying model/parser
 module came to exist," not as a description of the current UI.

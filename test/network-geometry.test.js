@@ -1,35 +1,56 @@
 const { test, report, assert } = require('./harness');
-const { layoutBipartiteNetwork, layoutPetal, layoutForceDirected, layoutNetwork } = require('../src/viz/network-geometry');
+const { layoutCentricRing, layoutPetal, layoutForceDirected, layoutNetwork } = require('../src/viz/network-geometry');
 
-test('hubs are placed on an inner ring, all equidistant from centre', () => {
-  const { hubPositions } = layoutBipartiteNetwork(['A', 'B', 'C'], [], { width: 400, height: 400 });
-  const cx = 200, cy = 200;
-  const dists = [...hubPositions.values()].map((p) => Math.hypot(p.x - cx, p.y - cy));
-  assert.ok(dists.every((d) => Math.abs(d - dists[0]) < 1e-6));
+const cx = 200, cy = 200;
+const distFromCentre = (p) => Math.hypot(p.x - cx, p.y - cy);
+
+test('the central hub sits exactly at the canvas centre', () => {
+  const { hubPositions } = layoutCentricRing(['A', 'B', 'C'], [], { width: 400, height: 400, centralHubId: 'A' });
+  assert.ok(distFromCentre(hubPositions.get('A')) < 1e-6);
 });
 
-test('leaves are placed on an outer ring, further from centre than any hub', () => {
-  const leaves = [{ id: 'c1', hubIds: ['A'] }, { id: 'c2', hubIds: ['A', 'B'] }];
-  const { hubPositions, leafPositions } = layoutBipartiteNetwork(['A', 'B'], leaves, { width: 400, height: 400 });
-  const cx = 200, cy = 200;
-  const hubR = Math.hypot([...hubPositions.values()][0].x - cx, [...hubPositions.values()][0].y - cy);
-  const leafR = Math.hypot([...leafPositions.values()][0].x - cx, [...leafPositions.values()][0].y - cy);
-  assert.ok(leafR > hubR);
+test('secondary hubs are placed on an outer ring, all equidistant from centre and from the central hub', () => {
+  const { hubPositions } = layoutCentricRing(['A', 'B', 'C'], [], { width: 400, height: 400, centralHubId: 'A' });
+  const distB = distFromCentre(hubPositions.get('B'));
+  const distC = distFromCentre(hubPositions.get('C'));
+  assert.ok(Math.abs(distB - distC) < 1e-6);
+  assert.ok(distB > distFromCentre(hubPositions.get('A')));
+});
+
+test('a contended leaf sits on a middle ring, strictly between the centre and the secondary hubs', () => {
+  const leaves = [{ id: 'c1', hubIds: ['A', 'B'] }];
+  const { hubPositions, leafPositions } = layoutCentricRing(['A', 'B'], leaves, { width: 400, height: 400, centralHubId: 'A' });
+  const leafR = distFromCentre(leafPositions.get('c1'));
+  const hubR = distFromCentre(hubPositions.get('B'));
+  assert.ok(leafR > 0, 'should not sit exactly at the centre');
+  assert.ok(leafR < hubR, 'should sit strictly inside the secondary hub\'s ring');
+});
+
+test('a leaf uncontended and core to the central hub sits close to the centre, closer than any contended leaf', () => {
+  const leaves = [{ id: 'core1', hubIds: ['A'] }, { id: 'disputed1', hubIds: ['A', 'B'] }];
+  const { leafPositions } = layoutCentricRing(['A', 'B'], leaves, { width: 400, height: 400, centralHubId: 'A' });
+  assert.ok(distFromCentre(leafPositions.get('core1')) < distFromCentre(leafPositions.get('disputed1')));
+});
+
+test('a leaf uncontended and core to a secondary hub sits near that hub, not near the centre', () => {
+  const leaves = [{ id: 'coreB', hubIds: ['B'] }];
+  const { hubPositions, leafPositions } = layoutCentricRing(['A', 'B'], leaves, { width: 400, height: 400, centralHubId: 'A' });
+  const p = leafPositions.get('coreB');
+  const b = hubPositions.get('B');
+  assert.ok(Math.hypot(p.x - b.x, p.y - b.y) < distFromCentre(p), 'closer to its own hub than to the centre');
 });
 
 test('every leaf and hub gets a distinct position', () => {
   const leaves = [{ id: 'c1', hubIds: ['A'] }, { id: 'c2', hubIds: ['B'] }, { id: 'c3', hubIds: ['A', 'B'] }];
-  const { leafPositions } = layoutBipartiteNetwork(['A', 'B'], leaves, { width: 400, height: 400 });
+  const { leafPositions } = layoutCentricRing(['A', 'B'], leaves, { width: 400, height: 400, centralHubId: 'A' });
   assert.strictEqual(leafPositions.size, 3);
 });
 
-test('leaves sharing a primary hub end up adjacent in ring order', () => {
-  const leaves = [
-    { id: 'z1', hubIds: ['A'] }, { id: 'a1', hubIds: ['B'] }, { id: 'z2', hubIds: ['A'] },
-  ];
-  const { orderedLeaves } = layoutBipartiteNetwork(['A', 'B'], leaves, { width: 400, height: 400 });
-  const hubSequence = orderedLeaves.map((l) => l.hubIds[0]);
-  assert.deepStrictEqual(hubSequence, ['A', 'A', 'B']);
+test('falls back to the first sorted hub id as central when centralHubId is omitted or unknown', () => {
+  const withOmitted = layoutCentricRing(['B', 'A'], [], { width: 400, height: 400 });
+  const withUnknown = layoutCentricRing(['B', 'A'], [], { width: 400, height: 400, centralHubId: 'Z' });
+  assert.ok(distFromCentre(withOmitted.hubPositions.get('A')) < 1e-6);
+  assert.ok(distFromCentre(withUnknown.hubPositions.get('A')) < 1e-6);
 });
 
 test('layoutPetal places each leaf inside its primary hub angular sector', () => {
