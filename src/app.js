@@ -330,14 +330,14 @@ function renderReconciliationCard(records, result, magSummaryData, filteredMagId
   return `
     <div class="card">
       <h3>Cross-tool reconciliation</h3>
-      <div class="row-count">${tools.length} tools loaded (${tools.join(', ')}) &middot; ${magSummaryData.length.toLocaleString()} putative MAGs matched by contig overlap (reciprocal best hit, min Jaccard ${currentParams.minJaccard}) &middot; ${filteredMagIds.size.toLocaleString()} of ${magSummaryData.length.toLocaleString()} match the current MAG filters &middot; select a MAG to explore it below. Contigs/Completeness/Redundancy reflect your current working decisions (see Export); Core/Disputed/In network are the original cross-tool vote counts.</div>
+      <div class="row-count">${tools.length} tools loaded (${tools.join(', ')}) &middot; ${magSummaryData.length.toLocaleString()} putative MAGs matched by contig overlap (reciprocal best hit, min Jaccard ${currentParams.minJaccard}) &middot; ${filteredMagIds.size.toLocaleString()} of ${magSummaryData.length.toLocaleString()} match the current MAG filters &middot; select a MAG to explore it below. Currently assigned/Completeness/Redundancy reflect your current working decisions (see Export); Undisputed/Disputed/Total associated are the original cross-tool vote counts.</div>
       <div class="table-wrap scroll-panel">
         <table class="data-table">
           <thead><tr>
             <th>Putative MAG</th>
-            <th class="num" title="Contigs currently assigned here in your working decisions">Contigs</th>
-            <th class="num" title="Every contig any tool voted for this MAG, win or lose — what the contig network below actually shows. Can be far larger than Contigs: an unmatched bin still votes for all its own contigs even when other tools outvote it on nearly all of them.">In network</th>
-            <th class="num" title="Contigs every voting tool originally agreed belong to this MAG">Core</th>
+            <th class="num" title="Contigs currently assigned here in your working decisions (Undisputed + Disputed + your decisions) — always found within Total associated">Currently assigned</th>
+            <th class="num" title="Every contig any tool voted for this MAG, win or lose — what the contig network below actually shows. Can be far larger than Currently assigned: an unmatched bin still votes for all its own contigs even when other tools outvote it on nearly all of them.">Total associated</th>
+            <th class="num" title="Contigs every voting tool originally agreed belong to this MAG">Undisputed</th>
             <th class="num" title="Contigs originally assigned here by some but not all voting tools">Disputed</th>
             <th class="num" title="Recall-adjusted, from the current working assignment — see Thresholds & parameters">Completeness</th>
             <th class="num" title="Recall-adjusted, from the current working assignment — see Thresholds & parameters">Redundancy</th>
