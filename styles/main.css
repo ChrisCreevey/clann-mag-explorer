@@ -188,13 +188,13 @@ main > *, #wrap, #explorer, .card{min-width:0}
    is the most attention-grabbing state: brightest fill, thickest ink
    stroke, and the largest radius (set in reconciliation-network.js), so
    it reads as "unresolved and needs you" at a glance, distinct from a
-   disputed contig that at least has a leaning majority. */
+   disputed contig that at least has a current holder either way. */
 .network-leaf-tied{fill:var(--amber-500);stroke:var(--ink);stroke-width:1.8}
 :root[data-theme="dark"] .network-leaf-tied{fill:var(--amber-400)}
-.network-leaf-disputed{fill:var(--clay-500);opacity:.9}
-:root[data-theme="dark"] .network-leaf-disputed{fill:var(--clay-400)}
-.network-leaf-resolved{fill:var(--moss-500);stroke:var(--moss-500);stroke-width:1.4}
-:root[data-theme="dark"] .network-leaf-resolved{fill:var(--moss-300);stroke:var(--moss-300)}
+.network-leaf-held-elsewhere{fill:var(--clay-500);opacity:.9}
+:root[data-theme="dark"] .network-leaf-held-elsewhere{fill:var(--clay-400)}
+.network-leaf-held-here{fill:var(--moss-500);stroke:var(--moss-500);stroke-width:1.4}
+:root[data-theme="dark"] .network-leaf-held-here{fill:var(--moss-300);stroke:var(--moss-300)}
 .network-leaf-excluded{fill:var(--line);opacity:.6;stroke-dasharray:1.5,1}
 /* Persistent click-selection ring (reconciliation-network.js's pinnedLeafId)
    — layered on top of whichever state class is also present; declared

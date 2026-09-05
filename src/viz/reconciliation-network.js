@@ -11,14 +11,16 @@
 // Pure DOM/SVG wiring on top of network-geometry.js's layouts.
 //
 // Each leaf carries a `state` (app.js's buildMagNeighborhood): 'core' (only
-// ever voted into one shown MAG — nothing to decide, drawn smaller/dimmer),
-// 'tied' (2+ shown MAGs, no single majority winner among the tools that
-// voted at all — drawn largest/brightest, since there is no default
-// standing in for a decision here), 'disputed' (2+ shown MAGs, one has a
-// clear majority but the student hasn't confirmed it), 'resolved' (2+
-// shown MAGs, the student assigned it via the evidence panel), or
-// 'excluded' (removed from consideration entirely) — see the
-// .network-leaf-* classes in styles/main.css.
+// ever voted into one shown MAG — undisputed, nothing to decide, drawn
+// smaller/dimmer), 'tied' (2+ shown MAGs, no current holder at all — no
+// majority vote among the tools and no decision either — drawn
+// largest/brightest, since there is genuinely no default standing in for
+// a decision here), 'held-here' (2+ shown MAGs, currently assigned to the
+// central/selected MAG — whether by today's majority-vote default or the
+// student's explicit decision, no distinction drawn between the two),
+// 'held-elsewhere' (2+ shown MAGs, currently assigned to a *different*
+// MAG), or 'excluded' (the student removed it from consideration
+// entirely) — see the .network-leaf-* classes in styles/main.css.
 //
 // A clicked leaf stays highlighted (its edges at full opacity, its circle
 // ringed via .network-leaf-selected) after the mouse leaves, tracked
@@ -47,7 +49,7 @@ const HUES = [200, 20, 150, 280, 50, 320, 100, 250, 0, 170];
 /**
  * @param {HTMLElement} container
  * @param {{hubs:{id:string,label:string}[],
- *           leaves:{id:string,hubIds:string[],state?:'core'|'tied'|'disputed'|'resolved'|'excluded'}[],
+ *           leaves:{id:string,hubIds:string[],state?:'core'|'tied'|'held-here'|'held-elsewhere'|'excluded'}[],
  *           edges:{leafId:string,hubId:string,tool:string}[]}} data
  * @param {{width?:number, height?:number, algorithm?: 'ring'|'petal'|'force',
  *           centralHubId?: string, selectedLeafId?: string|null,
@@ -234,17 +236,18 @@ function createReconciliationNetwork(container, data, options = {}) {
   }
 
   const LEAF_STATE_LABELS = {
-    core: 'unanimous core contig',
-    tied: 'tied — no majority vote at all, your call',
-    disputed: 'disputed — one MAG leads the vote, not yet confirmed',
-    resolved: 'resolved by you', excluded: 'excluded by you',
+    core: 'undisputed',
+    tied: 'unresolved — no majority vote at all, your call',
+    'held-here': 'disputed — held here (default or your decision)',
+    'held-elsewhere': 'disputed — held elsewhere (default or your decision)',
+    excluded: 'excluded by you',
   };
-  const LEAF_STATE_RADIUS = { core: 2.5, tied: 4.5, disputed: 3.5, resolved: 3.5, excluded: 3.5 };
+  const LEAF_STATE_RADIUS = { core: 2.5, tied: 4.5, 'held-here': 3.5, 'held-elsewhere': 3.5, excluded: 3.5 };
   const leafEls = new Map();
   for (const leaf of leaves) {
     const p = leafPositions.get(leaf.id);
     if (!p) continue;
-    const state = leaf.state || 'disputed';
+    const state = leaf.state || 'tied';
     const g = document.createElementNS(SVG_NS, 'g');
     const circle = document.createElementNS(SVG_NS, 'circle');
     circle.setAttribute('cx', p.x); circle.setAttribute('cy', p.y); circle.setAttribute('r', String(LEAF_STATE_RADIUS[state] ?? 3.5));
