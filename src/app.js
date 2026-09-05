@@ -680,6 +680,35 @@ function initMagNetwork(result, neighborhood, records) {
  * `workingAssignment` Map, so a decision here is immediately visible in
  * all three on the next render.
  */
+/**
+ * Standard deviations `contigRecord`'s tetranucleotide composition sits
+ * from the centroid of `coreRecords`' own composition vectors — the same
+ * signal the (now-removed) outlier-flagging card used, reimplemented here
+ * at the scale it's actually needed: one contig against one candidate
+ * MAG's core set, not a whole-assembly pass. A high value means this
+ * contig's overall genomic signature doesn't look like the rest of the
+ * MAG, independent of the GC%/coverage/coding-density comparisons already
+ * in this table (composition captures k-mer usage patterns those single
+ * numbers don't). Returns null when there are too few core contigs (< 2)
+ * to define a meaningful centroid and spread.
+ */
+function compositionZScore(contigRecord, coreRecords) {
+  if (coreRecords.length < 2) return null;
+  const keys = Object.keys(coreRecords[0].composition);
+  const vectorOf = (r) => keys.map((k) => r.composition[k] || 0);
+  const centroid = keys.map((_, i) => coreRecords.reduce((s, r) => s + vectorOf(r)[i], 0) / coreRecords.length);
+  const distanceFromCentroid = (v) => Math.sqrt(keys.reduce((s, k, i) => s + (v[i] - centroid[i]) ** 2, 0));
+
+  const coreDistances = coreRecords.map((r) => distanceFromCentroid(vectorOf(r)));
+  const meanDist = coreDistances.reduce((a, b) => a + b, 0) / coreDistances.length;
+  const variance = coreDistances.reduce((s, d) => s + (d - meanDist) ** 2, 0) / coreDistances.length;
+  const stdDev = Math.sqrt(variance);
+  if (stdDev === 0) return 0;
+
+  const contigDist = distanceFromCentroid(vectorOf(contigRecord));
+  return (contigDist - meanDist) / stdDev;
+}
+
 function renderContigEvidence(contigId, result, records) {
   const container = document.getElementById('contigEvidence');
   if (!container) return;
@@ -718,6 +747,9 @@ function renderContigEvidence(contigId, result, records) {
         : null;
       const gcDiff = meanGc !== null ? contigGc - meanGc : null;
       const covRatio = meanCov !== null && contigCov !== null && meanCov > 0 ? contigCov / meanCov : null;
+      const meanCodingDensity = coreRecords.length ? (coreRecords.reduce((s, r) => s + r.codingDensity, 0) / coreRecords.length) * 100 : null;
+      const codingDensityDiff = meanCodingDensity !== null ? (record.codingDensity * 100) - meanCodingDensity : null;
+      const compositionZ = compositionZScore(record, coreRecords);
 
       // "If this contig were added to this MAG's core set, would each of
       // its marker families be a new (unique) one, or a duplicate
@@ -756,6 +788,9 @@ function renderContigEvidence(contigId, result, records) {
         <td class="num">${gcDiff === null ? '<span class="hint">n/a</span>' : `${gcDiff > 0 ? '+' : ''}${gcDiff.toFixed(1)}pp`}</td>
         <td class="num">${meanCov === null ? '<span class="hint">n/a</span>' : meanCov.toFixed(1)}</td>
         <td class="num">${covRatio === null ? '<span class="hint">n/a</span>' : `${covRatio.toFixed(2)}&times;`}</td>
+        <td class="num">${meanCodingDensity === null ? '<span class="hint">n/a</span>' : `${meanCodingDensity.toFixed(1)}%`}</td>
+        <td class="num">${codingDensityDiff === null ? '<span class="hint">n/a</span>' : `${codingDensityDiff > 0 ? '+' : ''}${codingDensityDiff.toFixed(1)}pp`}</td>
+        <td class="num">${compositionZ === null ? '<span class="hint">n/a</span>' : compositionZ.toFixed(2)}</td>
         <td>${markerStatus}</td>
         <td>${isCurrent ? '<strong>current</strong>' : `<button class="act evidence-assign-btn" type="button" data-mag-id="${magId}">Assign here</button>`}</td>
       </tr>`;
@@ -781,6 +816,9 @@ function renderContigEvidence(contigId, result, records) {
             <th class="num" title="This contig's GC% minus the MAG's mean core GC%">GC diff</th>
             <th class="num" title="Mean coverage depth of this MAG's other core contigs">MAG mean cov.</th>
             <th class="num" title="This contig's mean coverage divided by the MAG's mean core coverage">Cov. ratio</th>
+            <th class="num" title="Mean coding density (fraction of the contig in a continuous coding-length stretch, six-frame) of this MAG's other core contigs">MAG mean coding %</th>
+            <th class="num" title="This contig's coding density minus the MAG's mean core coding density — a real gene-dense prokaryotic contig should be high; a much lower value than its candidate MAG is a contamination/junk signal">Coding % diff</th>
+            <th class="num" title="Standard deviations this contig's tetranucleotide composition sits from this MAG's other core contigs' average — independent of GC%/coverage/coding density, captures overall k-mer usage pattern">Composition Z</th>
             <th title="This contig's marker-gene families, and whether assigning it here would be a unique contribution or a duplicate">Marker genes</th>
             <th>Decision</th>
           </tr></thead>
@@ -852,10 +890,30 @@ async function initContigSequenceSection(contigId) {
   }
 
   const fasta = `>${record.header}\n${wrapSequence(sequence)}\n`;
+
+  // Coarse "does this look like real coding sequence" signal, computed
+  // fresh for just this one contig (see orf-finder.js) — cheap enough to
+  // do synchronously right after the sequence itself loads, no separate
+  // spinner/step needed. A prokaryotic contig that's genuinely part of
+  // this MAG should be densely covered in long ORFs; large uncoloured
+  // stretches are a chimera/junk-contig signal worth a second look.
+  const { findOrfRanges, highlightOrfsHtml } = window.ClannMAG.orfFinder;
+  const orfRanges = findOrfRanges(sequence);
+  const fwdOrfCount = orfRanges.filter((r) => r.strand === 'fwd').length;
+  const revOrfCount = orfRanges.filter((r) => r.strand === 'rev').length;
+  const orfBasesCovered = new Set();
+  for (const { start, end } of orfRanges) for (let i = start; i < end; i++) orfBasesCovered.add(i);
+  const orfCoveragePct = sequence.length ? (orfBasesCovered.size / sequence.length) * 100 : 0;
+
   freshContainer.innerHTML = `
     <h4>Sequence</h4>
-    <div class="row-count">${sequence.length.toLocaleString()} bp</div>
-    <div class="table-wrap scroll-panel" style="max-height:220px"><pre class="contig-sequence">${wrapSequence(sequence)}</pre></div>
+    <div class="row-count">${sequence.length.toLocaleString()} bp &middot; ${(fwdOrfCount + revOrfCount).toLocaleString()} ORF(s) &#8805;${window.ClannMAG.orfFinder.DEFAULT_MIN_AA_LENGTH}aa found (${fwdOrfCount} forward, ${revOrfCount} reverse) &middot; ${orfCoveragePct.toFixed(0)}% of the sequence falls inside one</div>
+    <div class="network-legend" style="margin:0 0 6px">
+      <span class="hint">ORF highlight:</span>
+      <span class="network-legend-item"><span class="network-swatch orf-fwd-swatch"></span>forward strand</span>
+      <span class="network-legend-item"><span class="network-swatch orf-rev-swatch"></span>reverse strand</span>
+    </div>
+    <div class="table-wrap scroll-panel" style="max-height:220px"><pre class="contig-sequence">${highlightOrfsHtml(sequence, orfRanges)}</pre></div>
     <div class="row" style="margin-top:8px">
       <button class="act" id="copySequenceBtn" type="button">Copy sequence (FASTA)</button>
       <button class="act" id="blastSequenceBtn" type="button">Send to NCBI BLAST (blastn) &#8599;</button>

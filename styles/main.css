@@ -221,6 +221,19 @@ main > *, #wrap, #explorer, .card{min-width:0}
 .marker-redundant{background:color-mix(in srgb, var(--amber-500) 18%, transparent);color:var(--amber-500)}
 :root[data-theme="dark"] .marker-redundant{background:color-mix(in srgb, var(--amber-400) 20%, transparent);color:var(--amber-400)}
 .contig-sequence{font-family:var(--font-mono);font-size:11px;line-height:1.5;white-space:pre;margin:0;padding:8px}
+/* ORF highlighting (orf-finder.js's findOrfRanges/highlightOrfsHtml) —
+   forward/reverse strand get distinct colours, orf-both (rare: only when
+   a forward and reverse ORF genuinely overlap) their overlap. */
+.contig-sequence .orf-fwd{background:color-mix(in srgb, var(--compute-500) 32%, transparent)}
+:root[data-theme="dark"] .contig-sequence .orf-fwd{background:color-mix(in srgb, var(--compute-glow) 30%, transparent)}
+.contig-sequence .orf-rev{background:color-mix(in srgb, var(--amber-500) 32%, transparent)}
+:root[data-theme="dark"] .contig-sequence .orf-rev{background:color-mix(in srgb, var(--amber-400) 30%, transparent)}
+.contig-sequence .orf-both{background:color-mix(in srgb, var(--clay-500) 32%, transparent)}
+:root[data-theme="dark"] .contig-sequence .orf-both{background:color-mix(in srgb, var(--clay-400) 30%, transparent)}
+.orf-fwd-swatch{background:color-mix(in srgb, var(--compute-500) 65%, transparent)}
+:root[data-theme="dark"] .orf-fwd-swatch{background:color-mix(in srgb, var(--compute-glow) 65%, transparent)}
+.orf-rev-swatch{background:color-mix(in srgb, var(--amber-500) 65%, transparent)}
+:root[data-theme="dark"] .orf-rev-swatch{background:color-mix(in srgb, var(--amber-400) 65%, transparent)}
 
 /* ---- Collapsible raw contig table ---- */
 .card details>summary{cursor:pointer;list-style:none;display:flex;align-items:center;gap:6px}
