@@ -5,10 +5,34 @@ Written for whoever (human or Claude) picks this up next. Read this first, then
 decision, bug found, and performance number is recorded there — this document is the map, that one is the
 territory). The original spec is [`clann-mag-explorer-brief.md`](../clann-mag-explorer-brief.md) at repo root.
 
-## Where things stand
+## 2026-09 redesign — read this before trusting anything below about the UI
 
-All 9 phases of the brief's plan are done. All 145 tests pass (`node test/run.js`), the working tree is clean,
-and the app has been verified end-to-end in a real browser at every phase (not just unit-tested).
+The 9-phase build below shipped every view the brief asked for, but real use showed the result was too much —
+too many tables, no single clear workflow. The app was redesigned around one task: resolving a contested contig.
+`src/app.js`'s top comment describes the current shape; short version:
+
+- The cross-tool reconciliation table is now a **MAG picker** — selecting a row scopes the contig network below
+  it to that MAG's full contig set, plus (one hop only) any other MAG its disputed contigs also touch
+  (`buildMagNeighborhood`). Clicking a hub jumps to that MAG's own neighborhood instead.
+- Clicking a contested contig in the network opens an **evidence panel** (`renderContigEvidence`): one row per
+  candidate MAG, with GC%/coverage vs. that MAG's core contigs and marker-gene unique-vs-duplicate status, plus
+  "Assign here"/"Exclude" buttons. Every decision writes into `workingAssignment`, the one live session state the
+  picker table, the network's leaf colouring, and Export all read from.
+- **Removed entirely**: the per-tool bin-summary cards, the Phase 7 scatter-based manual reassignment section, and
+  the Phase 8 whole-assembly QC/redundancy comparison section (`src/viz/scatter.js`, `scatter-geometry.js`,
+  `src/model/qc-comparison.js`, `mag-redundancy.js`, and their tests were deleted — nothing else used them).
+  The per-contig raw table survived as a collapsed `<details>` at the bottom, not a primary view.
+- The outlier/disagreement card is now scoped to whichever MAG is selected, not the whole assembly.
+- Left-pane MAG filters moved above contig filters — their job now is finding which MAG to select, which is the
+  left pane's primary purpose post-redesign; contig filters only narrow the collapsed raw table.
+
+None of the phase-by-phase history below was rewritten to match — read it as "how each underlying model/parser
+module came to exist," not as a description of the current UI.
+
+## Where things stood after the original 9-phase build (superseded UI, model layer mostly still accurate)
+
+All 9 phases of the brief's plan were done. 145 tests passed (`node test/run.js`), the working tree was clean,
+and the app had been verified end-to-end in a real browser at every phase (not just unit-tested).
 
 | Phase | What it added | Status |
 |---|---|---|

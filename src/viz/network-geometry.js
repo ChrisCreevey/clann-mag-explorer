@@ -2,7 +2,7 @@
   'use strict';
 
 // Pure layout for the cross-tool reconciliation bipartite network (MAG hubs
-// vs. disputed-contig leaves) — no DOM here, matching scatter-geometry.js's
+// vs. contig leaves) — no DOM here, matching reconciliation-network.js's
 // split of geometry from rendering. Three interchangeable algorithms
 // (layoutNetwork dispatches by name): a plain ring (deterministic, cheap,
 // good default for smaller networks), a petal layout (leaves clustered

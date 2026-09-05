@@ -2,30 +2,61 @@
   'use strict';
 
 // App shell. Loads an assembly FASTA (streamed through fasta-index.js in a
-// Worker, with marker-gene search) and, per Phase 4/5, any number of
-// contig->bin tables alongside it — content-sniffed from whatever else was
-// selected, not by filename (the tool label per table IS taken from its
-// filename, since content alone can't name which binning tool produced
-// it). One table gets a single per-bin summary (Phase 4); two or more
-// also get cross-tool reconciliation (Phase 5): bins matched across tools
-// by contig overlap, core/disputed contig sets, and a side-by-side view.
-// Phase 6 adds a combined outlier/disagreement view; Phase 7 (this
-// module's newest section, see renderInteractiveSection below) adds a
-// live-editable working bin assignment — a scatter plot with rectangular
-// drag-select (brief's simplified lasso, see scatter-geometry.js), move/
-// merge/split-via-reassignment actions, and bin summaries that
-// recalculate immediately off the current in-session edits rather than
-// the original loaded tables. Filters/search land in a later phase.
+// Worker, with marker-gene search) and any number of contig->bin tables
+// alongside it — content-sniffed from whatever else was selected, not by
+// filename (the tool label per table IS taken from its filename, since
+// content alone can't name which binning tool produced it). Two or more
+// tables get cross-tool reconciliation: bins matched across tools by
+// contig overlap, core/disputed contig sets.
+//
+// The app is deliberately centred on one workflow: pick a putative MAG
+// (the picker table in renderReconciliationCard) to see it, and any MAG
+// its disputed contigs also touch, as a contig network
+// (buildMagNeighborhood/initMagNetwork); click a contested contig to see
+// per-candidate-MAG evidence — GC/coverage vs. that MAG's core contigs,
+// marker-gene unique-vs-duplicate status — and decide where it belongs or
+// exclude it (renderContigEvidence). Every decision writes into
+// `workingAssignment`, the one live session state the MAG picker table,
+// the network's leaf colouring, and Export all read from. Earlier
+// standalone views (per-tool bin summaries, a scatter-based manual
+// reassignment section, whole-assembly QC/redundancy comparisons) were
+// removed in that redesign — see docs/HANDOVER.md — in favour of this
+// single contig-resolution flow.
 
 const THEME_KEY = 'clann-mag-explorer-theme';
 
 // Session-level interactive-reassignment state — deliberately module-level
 // (not passed around as parameters) since it needs to survive across
-// scatter-plot re-renders and outlives any single render() call. Reset on
-// every fresh assembly load (loadAssembly) — a new session starts clean.
+// re-renders and outlives any single render() call. Reset on every fresh
+// assembly load (loadAssembly) — a new session starts clean.
 let workingAssignment = new Map();
 let workingAssignmentInitialized = false; // guards deriveInitialAssignment from re-running (and losing manual edits) when a filter change rebuilds the DOM
-let scatterPlotHandle = null;
+
+// Which putative MAG's neighborhood the contig network is currently scoped
+// to, and which contig within it has an evidence panel open — both null
+// until the student picks one from the MAG picker table. Reset on every
+// fresh assembly load, same as workingAssignment above.
+let selectedMagId = null;
+let selectedContigId = null;
+
+// Contigs the student has explicitly decided via the evidence panel's
+// "Assign here"/"Exclude" buttons — deliberately NOT the same thing as
+// "workingAssignment has an entry for this contig", since
+// deriveInitialAssignment already seeds workingAssignment with a
+// majority-vote default for every voted contig (including disputed ones)
+// as a starting point. Without this separate set, every disputed contig
+// would render as 'resolved' from the moment of load, before the student
+// touched anything — this set is what actually distinguishes "still
+// needs a look" from "you decided this."
+let decidedContigIds = new Set();
+
+// Sentinel working-assignment "bin" for a contig the student has decided
+// belongs to neither of its contended MAGs — a real value in the same
+// contigId->binId Map as every other assignment (working-assignment.js's
+// reassignContigs doesn't need to know this is special), so it shows up
+// like any other bin in the export dropdown/CSV rather than needing its
+// own separate tracking structure.
+const EXCLUDED_BIN_ID = 'excluded';
 
 // Left-pane filters (brief §Left pane: filters and search) — `currentFilters`
 // is the live filter state (src/model/filters.js's shape), and `latest` is
@@ -43,19 +74,16 @@ let latest = null;
 // MAG-level filtering (src/model/mag-filters.js) — a second, independent
 // filter axis over the cross-tool reconciliation table's own columns
 // (Putative MAG, Core, Disputed, Completeness, Redundancy, Tier, supporting
-// tool), rather than per-contig properties. Reduces the reconciliation
-// table, the agreement network, and the QC section down to just the
-// selected MAGs; the interactive refine/QC-comparison-scatter/export
-// sections stay on the full session for the same reason contig filters
-// don't touch them (see renderFilteredExplorer).
+// tool), rather than per-contig properties. This is the left pane's primary
+// job in the redesign: narrowing the MAG picker table down to the MAG
+// worth selecting next.
 let currentMagFilters = null;
 
 // Global thresholds/parameters a student can adjust to see how sensitive
 // the tool's derived calls are to where these lines are drawn: MIMAG
 // quality-tier cutoffs (bin-summary.js), the cross-tool bin-matching
-// overlap threshold (bin-reconciliation.js's minJaccard), the outlier
-// flagging thresholds (outliers.js's computeFlagCount), and the duplicate-
-// MAG composition-similarity threshold (mag-redundancy.js). Everything
+// overlap threshold (bin-reconciliation.js's minJaccard), and the outlier
+// flagging thresholds (outliers.js's computeFlagCount). Everything
 // here is cheap, pure-JS recomputation over already-parsed data — no
 // worker/marker-search re-run — except minJaccard, which changes bin
 // matching itself and so triggers a full recompute (recomputeLatest) at
@@ -67,7 +95,6 @@ function defaultGlobalParams() {
     mimag: { ...window.ClannMAG.binSummary.DEFAULT_MIMAG_THRESHOLDS },
     minJaccard: 0.1,
     outlier: { ...window.ClannMAG.outliers.DEFAULT_OUTLIER_PARAMS },
-    magDuplicateSimilarity: 0.95,
     // Recall-adjustment for completeness/redundancy (docs/scg-blast-
     // verification.md) — see bin-summary.js's DEFAULT_ESTIMATED_RECALL
     // for why this correction exists at all: the built-in marker search
@@ -180,69 +207,39 @@ function formatMimagTier(tier) {
   return `<span class="mimag-tier mimag-tier-${tier}">${label}</span>`;
 }
 
-function renderBinSummaryCard(records, binAssignments, toolLabel) {
-  const { computeBinSummaries } = window.ClannMAG.binSummary;
-  const { summaries, unmatchedContigIds } = computeBinSummaries(records, binAssignments, { thresholds: currentParams.mimag, recallRate: currentParams.recallRate });
-
-  const rows = summaries
-    .map((b) => `<tr>
-      <td>${b.binId}</td>
-      <td class="num">${b.contigCount.toLocaleString()}</td>
-      <td class="num">${b.totalLength.toLocaleString()}</td>
-      <td class="num">${b.n50.toLocaleString()}</td>
-      <td class="num">${b.l50.toLocaleString()}</td>
-      <td class="num">${(b.meanGc * 100).toFixed(1)}%</td>
-      <td class="num">${b.completeness.toFixed(1)}%</td>
-      <td class="num">${b.redundancy.toFixed(1)}%</td>
-      <td>${formatMimagTier(b.mimagTier)}</td>
-    </tr>`)
-    .join('');
-
-  const unmatchedNote = unmatchedContigIds.length
-    ? `<div class="hint">${unmatchedContigIds.length.toLocaleString()} contig ID(s) in the bin table were not found in the loaded assembly and were skipped (e.g. ${unmatchedContigIds.slice(0, 3).join(', ')}${unmatchedContigIds.length > 3 ? ', …' : ''}).</div>`
-    : '';
-
-  return `
-    <div class="card">
-      <h3>Bin summaries${toolLabel ? ` — ${toolLabel}` : ''}</h3>
-      <div class="row-count">${summaries.length.toLocaleString()} bins, largest first &middot; completeness/redundancy from the built-in marker-gene search (40 families), corrected for its measured recall (currently ${(currentParams.recallRate * 100).toFixed(0)}% &mdash; see Thresholds &amp; parameters) since it is a fast, approximate search, not a profile-HMM one &middot; MIMAG-style tier is a completeness/contamination proxy only, not the full standard (no rRNA/tRNA check)</div>
-      <div class="table-wrap scroll-panel">
-        <table class="data-table">
-          <thead><tr>
-            <th>Bin</th><th>Contigs</th><th>Length</th><th>N50</th><th>L50</th><th>Mean GC</th>
-            <th title="Fraction of the 40 marker families found anywhere in this bin, divided by the assumed marker-search recall rate (Thresholds & parameters) and capped at 100% — corrects for the search's known tendency to under-call, rather than reading the raw fraction as if it were the true answer">Completeness</th>
-            <th title="Families found on more than one contig (too many copies of a should-be-single-copy gene — a contamination proxy), scaled by the same recall-adjusted expected-family count as Completeness rather than by however many families this bin happened to find, so a poorly-recovered bin's small sample doesn't swing this number on noise">Redundancy</th>
-            <th>Tier</th>
-          </tr></thead>
-          <tbody>${rows}</tbody>
-        </table>
-      </div>
-      ${unmatchedNote}
-    </div>
-  `;
-}
-
 /**
- * Builds the reconciliation table's own per-MAG numbers as plain data
- * (not HTML) — this is both what renderReconciliationCard renders AND
- * exactly the shape src/model/mag-filters.js's applyMagFilters expects,
- * since the MAG filter section filters "by the columns of this table"
- * (the user's framing) rather than by some separately-derived metric.
- * Computed once per render pass in renderFilteredExplorer and threaded
- * through, so filtering doesn't redo this work per keystroke.
+ * Builds the MAG picker's per-MAG numbers as plain data (not HTML) — this
+ * is both what renderReconciliationCard renders AND exactly the shape
+ * src/model/mag-filters.js's applyMagFilters expects. Core/disputed counts
+ * are the original, static cross-tool vote counts (stable across a
+ * session, useful for "which MAGs had the most disputes worth resolving").
+ * Completeness/redundancy/tier, though, are read off the *live* working
+ * assignment (working-assignment.js) rather than the static reconciled
+ * core set — so once the student starts resolving disputed contigs via the
+ * evidence panel, this table's numbers move with those decisions, the
+ * same "every bin-level summary statistic recalculates live" property the
+ * old Phase 7 scatter view had, now folded into this one table instead of
+ * a separate section. Computed once per render pass in renderFilteredExplorer
+ * and threaded through, so filtering doesn't redo this work per keystroke.
  */
 function computeMagSummaryData(records, result) {
-  const { computeCompletenessRedundancy, mimagTier } = window.ClannMAG.binSummary;
-  const recordsById = new Map(records.map((r) => [r.id, r]));
+  const { computeBinSummaries } = window.ClannMAG.binSummary;
+  const { assignmentToRows } = window.ClannMAG.workingAssignment;
+  const magIds = new Set(result.putativeMags.map((m) => m.magId));
+  const liveRows = assignmentToRows(workingAssignment).filter((r) => magIds.has(r.binId));
+  const { summaries } = computeBinSummaries(records, liveRows, { thresholds: currentParams.mimag, recallRate: currentParams.recallRate });
+  const liveByMagId = new Map(summaries.map((s) => [s.binId, s]));
+
   return result.putativeMags.map((mag) => {
-    const coreRecords = mag.coreContigIds.map((id) => recordsById.get(id)).filter(Boolean);
-    const { completeness, redundancy } = computeCompletenessRedundancy(coreRecords, currentParams.recallRate);
+    const live = liveByMagId.get(mag.magId);
     return {
       magId: mag.magId,
       coreCount: mag.coreContigIds.length,
       disputedCount: mag.disputedContigIds.length,
-      completeness, redundancy,
-      tier: mimagTier(completeness, redundancy, currentParams.mimag),
+      liveContigCount: live ? live.contigCount : 0,
+      completeness: live ? live.completeness : 0,
+      redundancy: live ? live.redundancy : 0,
+      tier: live ? live.mimagTier : 'low',
       tools: mag.members.map((m) => m.tool),
       mag,
     };
@@ -250,20 +247,19 @@ function computeMagSummaryData(records, result) {
 }
 
 /**
- * Phase 5: matches bins across two or more loaded tools by contig
- * overlap and renders the reconciled view — putative MAGs (side by side
- * across tools), and the ranked disputed-contig list. `magSummaryData`
- * (see computeMagSummaryData) already carries the MIMAG tier computed
- * with the current thresholds; `filteredMagIds` restricts every part of
- * this card (the MAG table, the network, and the disputed-contig list) to
- * the MAGs selected in the MAG-filters panel — a contig counts as "in
- * filter" for the disputed list if ANY of its votes went to a MAG that's
- * still selected, since a contig disputed between a selected and a
- * deselected MAG is still relevant to the selected one.
+ * Renders the MAG picker table — the sole entry point into the contig
+ * network below. Selecting a row (via .mag-picker-select, wired as a
+ * delegated document click listener so it survives this card's wholesale
+ * innerHTML rebuilds) sets `selectedMagId` and re-renders, which scopes
+ * the network to that MAG's neighborhood (see buildMagNeighborhood).
+ * `filteredMagIds` (from the left-pane MAG filters — the left pane's job
+ * now, per the redesign, is finding which MAG to select here) restricts
+ * which rows show; core/disputed are the static cross-tool vote counts,
+ * completeness/redundancy/tier are live off the working assignment (see
+ * computeMagSummaryData).
  */
-function renderReconciliationCard(records, result, filteredIds, magSummaryData, filteredMagIds) {
+function renderReconciliationCard(records, result, magSummaryData, filteredMagIds) {
   const tools = result.tools;
-  const magSummaryByMagId = new Map(magSummaryData.map((m) => [m.magId, m]));
 
   const magRows = magSummaryData
     .filter((m) => filteredMagIds.has(m.magId))
@@ -276,8 +272,10 @@ function renderReconciliationCard(records, result, filteredIds, magSummaryData, 
             : '<td class="hint">—</td>';
         })
         .join('');
-      return `<tr>
-        <td>${m.magId}</td>
+      const isSelected = m.magId === selectedMagId;
+      return `<tr class="mag-picker-row${isSelected ? ' mag-picker-row-selected' : ''}">
+        <td><button class="act mag-picker-select" type="button" data-mag-id="${m.magId}">${isSelected ? '● ' : ''}${m.magId}</button></td>
+        <td class="num">${m.liveContigCount.toLocaleString()}</td>
         <td class="num">${m.coreCount.toLocaleString()}</td>
         <td class="num">${m.disputedCount.toLocaleString()}</td>
         <td class="num">${m.completeness.toFixed(1)}%</td>
@@ -288,46 +286,26 @@ function renderReconciliationCard(records, result, filteredIds, magSummaryData, 
     })
     .join('');
 
-  const contigVotedMagIds = (c) => new Set(Object.values(c.votes).filter(Boolean));
-  const disputedInFilter = result.disputedContigsRanked.filter((c) => {
-    if (!filteredIds.has(c.contigId)) return false;
-    for (const magId of contigVotedMagIds(c)) if (filteredMagIds.has(magId)) return true;
-    return false;
-  });
-
-  const DISPUTED_ROW_LIMIT = 200;
-  const disputedRows = disputedInFilter
-    .slice(0, DISPUTED_ROW_LIMIT)
-    .map((c) => {
-      const votesStr = tools.map((t) => `${t}: ${c.votes[t] ?? '<span class="hint">unbinned</span>'}`).join(' &middot; ');
-      return `<tr>
-        <td>${c.contigId}</td>
-        <td class="num">${(c.agreementFraction * 100).toFixed(0)}%</td>
-        <td class="num">${c.totalVotes}</td>
-        <td>${votesStr}</td>
-      </tr>`;
-    })
-    .join('');
-
   return `
     <div class="card">
       <h3>Cross-tool reconciliation</h3>
-      <div class="row-count">${tools.length} tools loaded (${tools.join(', ')}) &middot; ${magSummaryByMagId.size.toLocaleString()} putative MAGs matched by contig overlap (reciprocal best hit, min Jaccard ${currentParams.minJaccard}) &middot; ${filteredMagIds.size.toLocaleString()} of ${magSummaryByMagId.size.toLocaleString()} match the current MAG filters &middot; completeness/redundancy below are computed from each MAG's high-confidence core (unanimous-agreement) contigs only, recall-adjusted (see Thresholds &amp; parameters)</div>
+      <div class="row-count">${tools.length} tools loaded (${tools.join(', ')}) &middot; ${magSummaryData.length.toLocaleString()} putative MAGs matched by contig overlap (reciprocal best hit, min Jaccard ${currentParams.minJaccard}) &middot; ${filteredMagIds.size.toLocaleString()} of ${magSummaryData.length.toLocaleString()} match the current MAG filters &middot; select a MAG to explore it below. Contigs/Completeness/Redundancy reflect your current working decisions (see Export); Core/Disputed are the original cross-tool vote counts.</div>
       <div class="table-wrap scroll-panel">
         <table class="data-table">
           <thead><tr>
             <th>Putative MAG</th>
-            <th title="Contigs every voting tool agrees belong to this MAG">Core</th>
-            <th title="Contigs assigned here by some but not all voting tools">Disputed</th>
-            <th title="Recall-adjusted — see the Bin summaries card's Completeness column note">Completeness</th>
-            <th title="Recall-adjusted — see the Bin summaries card's Redundancy column note">Redundancy</th>
+            <th title="Contigs currently assigned here in your working decisions">Contigs</th>
+            <th title="Contigs every voting tool originally agreed belong to this MAG">Core</th>
+            <th title="Contigs originally assigned here by some but not all voting tools">Disputed</th>
+            <th title="Recall-adjusted, from the current working assignment — see Thresholds & parameters">Completeness</th>
+            <th title="Recall-adjusted, from the current working assignment — see Thresholds & parameters">Redundancy</th>
             <th>Tier</th>
             ${tools.map((t) => `<th>${t}</th>`).join('')}
           </tr></thead>
           <tbody>${magRows}</tbody>
         </table>
       </div>
-      <h4>Contig-level agreement network</h4>
+      <h4>Contig network</h4>
       <div class="row"><label>Arrange</label><select id="networkAlgorithm">
         <option value="ring">Ring</option>
         <option value="petal">Petal (grouped by MAG)</option>
@@ -335,41 +313,106 @@ function renderReconciliationCard(records, result, filteredIds, magSummaryData, 
       </select></div>
       <div class="row-count" id="reconciliationNetworkNote"></div>
       <div id="reconciliationNetwork"></div>
-      <h4>Disputed contigs, most split first</h4>
-      <div class="row-count">${disputedInFilter.length.toLocaleString()} of ${result.disputedContigsRanked.length.toLocaleString()} contigs where loaded tools disagree match the current contig and MAG filters${disputedInFilter.length > DISPUTED_ROW_LIMIT ? `, showing the first ${DISPUTED_ROW_LIMIT}` : ''}</div>
-      <div class="table-wrap scroll-panel">
-        <table class="data-table">
-          <thead><tr><th>Contig</th><th>Agreement</th><th>Tools voting</th><th>Votes by tool</th></tr></thead>
-          <tbody>${disputedRows}</tbody>
-        </table>
-      </div>
+      <div id="contigEvidence"></div>
     </div>
   `;
+}
+
+/**
+ * The primitive the redesigned network is built around: given a selected
+ * MAG, its own full contig set (core + disputed), plus — for every one of
+ * its disputed contigs — every *other* MAG any tool voted for instead,
+ * each shown with its own full contig set too. One hop only, off the
+ * selected MAG's own disputes; a secondary MAG's unrelated disputes with a
+ * third MAG are not pulled in, so the neighborhood stays a bounded,
+ * readable "this MAG and what it's contending with", not a recursive
+ * expansion across the whole reconciliation graph.
+ *
+ * A vote can name a MAG that lost every contig's majority vote and so was
+ * dropped from result.putativeMags entirely (bin-reconciliation.js's
+ * nonEmptyMags filter, documented there) — filtered out via magsById.has
+ * everywhere below, so such a MAG never becomes a hub with no contigs to
+ * back it, and edges never point at a hub that doesn't exist.
+ *
+ * @returns {{hubs, leaves, edges, truncated, totalContigs, allTotalContigs,
+ *   secondaryCount}|null} null if selectedMagId no longer names a real MAG
+ */
+function buildMagNeighborhood(selectedMagId, result) {
+  const magsById = new Map(result.putativeMags.map((m) => [m.magId, m]));
+  const primary = magsById.get(selectedMagId);
+  if (!primary) return null;
+
+  const secondaryMagIds = new Set();
+  for (const contigId of primary.disputedContigIds) {
+    const entry = latest.contigAgreementEntryByContigId.get(contigId);
+    if (!entry) continue;
+    for (const magId of Object.values(entry.votes)) {
+      if (magId && magId !== selectedMagId && magsById.has(magId)) secondaryMagIds.add(magId);
+    }
+  }
+
+  const shownMagIds = new Set([selectedMagId, ...secondaryMagIds]);
+  const shownMags = [...shownMagIds].map((id) => magsById.get(id));
+
+  const contigIdSet = new Set();
+  for (const mag of shownMags) for (const id of [...mag.coreContigIds, ...mag.disputedContigIds]) contigIdSet.add(id);
+  const allContigIds = [...contigIdSet];
+
+  const NODE_LIMIT = 300;
+  const contigIds = allContigIds.slice(0, NODE_LIMIT);
+  const truncated = allContigIds.length > NODE_LIMIT;
+
+  // A leaf's state drives the network's colouring (reconciliation-network.js):
+  // 'core' (only ever voted into one shown MAG, nothing to decide), 'disputed'
+  // (2+ shown MAGs, no decision made yet), 'resolved' (2+ shown MAGs, the
+  // student has explicitly assigned it via the evidence panel), 'excluded'
+  // (the student explicitly removed it from both/all). "Explicitly" matters:
+  // workingAssignment already carries a majority-vote default for every
+  // voted contig from deriveInitialAssignment, including disputed ones, so
+  // decidedContigIds — populated only by the evidence panel's own
+  // buttons — is what actually distinguishes "still needs a look" from
+  // "you decided this," not merely "workingAssignment has an entry."
+  const leaves = [];
+  const edges = [];
+  for (const contigId of contigIds) {
+    const entry = latest.contigAgreementEntryByContigId.get(contigId);
+    if (!entry) continue;
+    const hubIds = [...new Set(Object.values(entry.votes).filter((id) => id && shownMagIds.has(id)))];
+    if (hubIds.length === 0) continue;
+    const decided = decidedContigIds.has(contigId);
+    let state;
+    if (decided && workingAssignment.get(contigId) === EXCLUDED_BIN_ID) state = 'excluded';
+    else if (hubIds.length > 1) state = decided ? 'resolved' : 'disputed';
+    else state = 'core';
+    leaves.push({ id: contigId, hubIds, state });
+    for (const [tool, magId] of Object.entries(entry.votes)) {
+      if (magId && shownMagIds.has(magId)) edges.push({ leafId: contigId, hubId: magId, tool });
+    }
+  }
+
+  const hubs = shownMags.map((m) => ({ id: m.magId, label: m.magId }));
+  return {
+    hubs, leaves, edges, truncated,
+    totalContigs: contigIds.length, allTotalContigs: allContigIds.length,
+    secondaryCount: secondaryMagIds.size,
+  };
 }
 
 /**
  * Renders the hub-and-leaf network into the placeholder left by
  * renderReconciliationCard, above — split out because it needs a live DOM
  * node (createReconciliationNetwork builds SVG into it), unlike the rest
- * of that card which is a plain innerHTML string. Scoped to disputed
- * contigs only (brief's "disputed set", and result.disputedContigsRanked
- * is already restricted to contigs with 2+ distinct tool votes and
- * agreementFraction<1 — see bin-reconciliation.js), since a hub-and-leaf
- * edge per contig per voting tool would be an unreadable hairball if it
- * also had to include every unanimous core contig. Respects the current
- * contig filters (`filteredIds`) and, per MAG, `filteredMagIds` — a hub is
- * shown only if it's still selected, an edge to a hub outside the MAG
- * filter is dropped even if the contig itself is still shown via another
- * (selected) hub, and a leaf disappears once none of its hubs are
- * selected. The chosen layout algorithm (`networkAlgorithm`, module-level)
- * persists across filter changes and manual node drags are discarded on
- * re-layout — switching algorithm is "start over with a different
- * arrangement", not a blend.
+ * of that card which is a plain innerHTML string. `neighborhood` is
+ * `null` until a MAG is selected. The chosen layout algorithm
+ * (`networkAlgorithm`, module-level) persists across re-renders and
+ * changing it triggers a full re-render (simplest way to keep the network
+ * and the rest of the page — the evidence panel especially — consistent).
  */
-function initReconciliationNetwork(result, filteredIds, filteredMagIds) {
+function initMagNetwork(result, neighborhood, records) {
   const { createReconciliationNetwork } = window.ClannMAG.reconciliationNetwork;
   const container = document.getElementById('reconciliationNetwork');
   const note = document.getElementById('reconciliationNetworkNote');
+  const evidenceContainer = document.getElementById('contigEvidence');
   const algorithmSelect = document.getElementById('networkAlgorithm');
   if (!container || !note) return;
 
@@ -381,271 +424,172 @@ function initReconciliationNetwork(result, filteredIds, filteredMagIds) {
       algorithmSelect.dataset.wired = '1';
       algorithmSelect.addEventListener('change', () => {
         networkAlgorithm = algorithmSelect.value;
-        initReconciliationNetwork(result, filteredIds, filteredMagIds);
+        renderFilteredExplorer();
       });
     }
   }
 
-  const NODE_LIMIT = 250;
-  const disputedInFilter = result.disputedContigsRanked.filter((c) => filteredIds.has(c.contigId));
-
-  const leavesAll = [];
-  for (const c of disputedInFilter) {
-    const hubIds = [...new Set(Object.values(c.votes).filter(Boolean))].filter((h) => filteredMagIds.has(h));
-    if (hubIds.length > 0) leavesAll.push({ id: c.contigId, hubIds, votes: c.votes });
+  if (!selectedMagId || !neighborhood) {
+    container.innerHTML = '';
+    note.textContent = 'Select a putative MAG above to see its contigs and any contested overlaps with other MAGs.';
+    if (evidenceContainer) evidenceContainer.innerHTML = '';
+    return;
   }
-  const shown = leavesAll.slice(0, NODE_LIMIT);
 
-  const hubIdsSet = new Set();
-  const leaves = shown.map(({ id, hubIds }) => { hubIds.forEach((h) => hubIdsSet.add(h)); return { id, hubIds }; });
-  const edges = [];
-  for (const leaf of shown) {
-    for (const [tool, magId] of Object.entries(leaf.votes)) {
-      if (magId && filteredMagIds.has(magId)) edges.push({ leafId: leaf.id, hubId: magId, tool });
-    }
-  }
-  const hubs = [...hubIdsSet].map((id) => ({ id, label: id }));
+  note.textContent = `${selectedMagId}: ${neighborhood.totalContigs.toLocaleString()} contig(s) shown` +
+    (neighborhood.secondaryCount > 0
+      ? ` across ${neighborhood.hubs.length} MAG(s) (contending with ${neighborhood.secondaryCount})`
+      : ', no contested overlaps with other MAGs') +
+    (neighborhood.truncated ? ` — truncated from ${neighborhood.allTotalContigs.toLocaleString()} for readability, narrow with MAG filters` : '') +
+    '. Click a contig to compare evidence and decide where it belongs; click another MAG to explore its neighborhood.';
 
-  note.textContent = leavesAll.length === 0
-    ? 'No disputed contigs match the current contig and MAG filters.'
-    : `${shown.length.toLocaleString()} of ${leavesAll.length.toLocaleString()} disputed contig(s) shown as leaves around their voted MAG hubs` +
-      (leavesAll.length > NODE_LIMIT ? ` (limited to ${NODE_LIMIT} for readability — narrow with filters to see the rest)` : '') +
-      ' · one coloured line per tool that voted that contig into that MAG · hover a contig or MAG to trace its edges.';
+  createReconciliationNetwork(container, { hubs: neighborhood.hubs, leaves: neighborhood.leaves, edges: neighborhood.edges }, {
+    width: 680, height: 680, algorithm: networkAlgorithm,
+    onLeafClick: (leafId) => { selectedContigId = leafId; renderContigEvidence(leafId, result, records); },
+    onHubClick: (hubId) => { selectedMagId = hubId; selectedContigId = null; renderFilteredExplorer(); },
+  });
 
-  createReconciliationNetwork(container, { hubs, leaves, edges }, { width: 680, height: 680, algorithm: networkAlgorithm });
+  if (selectedContigId) renderContigEvidence(selectedContigId, result, records);
 }
 
 /**
- * Phase 7: builds and wires the live-editable reassignment section — a
- * scatter plot (brief's "composition, coverage, GC, length" axes; here
- * per-contig scalars, not the raw 136-dim composition vector, since a
- * literal scatter can't plot that many dimensions at once — Phase 6's
- * compositionZ is available as a derived axis instead), rectangular
- * drag-select, move/merge/new-bin actions, and a working-bins summary
- * table that recalculates immediately from bin-summary.js against the
- * current in-session assignment (working-assignment.js), not the
- * original loaded tables.
+ * The click-to-decide evidence panel (this simplification's central new
+ * feature): for a clicked contig, one row per MAG any tool voted it into,
+ * each with the evidence a student would weigh by hand — how this
+ * contig's GC%/coverage compares to that MAG's other core contigs, and
+ * whether each of its marker-gene families would be a unique contribution
+ * there or a duplicate of one already present (computeMarkerContributions,
+ * reused from the outlier-flagging module, run hypothetically against
+ * "this MAG's core set plus this one contig" rather than the contig's
+ * actual current bin). "Assign here" and "Exclude from both/all" both
+ * just call working-assignment.js's one reassignment primitive — the
+ * network, the MAG picker table, and this panel all read the same
+ * `workingAssignment` Map, so a decision here is immediately visible in
+ * all three on the next render.
  */
-function initInteractiveSection(records, binTablesByTool, reconciliationResult) {
-  const {
-    deriveInitialAssignment, assignmentToRows, reassignContigs, generateNewBinId, listBinIds,
-  } = window.ClannMAG.workingAssignment;
-  const { computeBinSummaries } = window.ClannMAG.binSummary;
-  const { createScatterPlot } = window.ClannMAG.scatter;
+function renderContigEvidence(contigId, result, records) {
+  const container = document.getElementById('contigEvidence');
+  if (!container) return;
 
-  if (!workingAssignmentInitialized) {
-    workingAssignment = deriveInitialAssignment(binTablesByTool, reconciliationResult);
-    workingAssignmentInitialized = true;
+  const recordsById = new Map(records.map((r) => [r.id, r]));
+  const record = recordsById.get(contigId);
+  const entry = latest.contigAgreementEntryByContigId.get(contigId);
+  if (!record || !entry) {
+    container.innerHTML = `<div class="hint">No evidence available for ${contigId}.</div>`;
+    return;
   }
 
-  const AXES = {
-    gcContent: { label: 'GC%', get: (r) => r.gcContent * 100 },
-    length: { label: 'Length (log₁₀ bp)', get: (r) => Math.log10(Math.max(1, r.length)) },
-    gcSkew: { label: 'GC skew', get: (r) => r.gcSkew },
-    codingDensity: { label: 'Coding density %', get: (r) => r.codingDensity * 100 },
-    coverage: {
-      label: 'Mean coverage depth',
-      get: (r) => (r.coverageDepths ? r.coverageDepths.reduce((a, b) => a + b, 0) / r.coverageDepths.length : 0),
-    },
-  };
-  const hasCoverage = records.some((r) => r.coverageDepths);
-  const axisKeys = Object.keys(AXES).filter((k) => k !== 'coverage' || hasCoverage);
-  const axisOptionsHtml = (selectedKey) =>
-    axisKeys.map((k) => `<option value="${k}" ${k === selectedKey ? 'selected' : ''}>${AXES[k].label}</option>`).join('');
+  const { computeMarkerContributions } = window.ClannMAG.binSummary;
+  const { reassignContigs } = window.ClannMAG.workingAssignment;
+  const magsById = new Map(result.putativeMags.map((m) => [m.magId, m]));
 
-  const card = document.getElementById('interactive-card');
-  card.innerHTML = `
-    <h3>Refine bins (interactive)</h3>
-    <div class="row-count">Drag on the plot to select a cluster of contigs (a simplified rectangular lasso), then move them to a bin below. Reassignments recalculate bin stats immediately. Shows every contig regardless of the left-pane filters, since reassignment acts on the full session, not a filtered view of it.</div>
-    <div class="row"><label>X axis</label><select id="scatterX">${axisOptionsHtml('gcContent')}</select></div>
-    <div class="row"><label>Y axis</label><select id="scatterY">${axisOptionsHtml('length')}</select></div>
-    <div id="scatterContainer"></div>
-    <div class="row" id="selectionRow" style="display:none"><label id="selectionLabel"></label></div>
-    <div class="row" id="actionRow" style="display:none">
-      <select id="targetBinSelect"></select>
-      <button class="act" id="applyMoveBtn" type="button">Move selected</button>
-      <button class="act" id="clearSelectionBtn" type="button">Clear selection</button>
+  const candidateMagIds = [...new Set(Object.values(entry.votes).filter(Boolean))].filter((id) => magsById.has(id));
+  const currentDecision = workingAssignment.get(contigId) || null;
+
+  const contigGc = record.gcContent * 100;
+  const contigCov = record.coverageDepths ? record.coverageDepths.reduce((a, b) => a + b, 0) / record.coverageDepths.length : null;
+  const contigFamilies = [...new Set((record.markerHits || []).map((h) => h.family))];
+
+  const rows = candidateMagIds
+    .map((magId) => {
+      const mag = magsById.get(magId);
+      const coreRecords = mag.coreContigIds
+        .map((id) => recordsById.get(id))
+        .filter((r) => r && r.id !== contigId);
+
+      const meanGc = coreRecords.length ? (coreRecords.reduce((s, r) => s + r.gcContent, 0) / coreRecords.length) * 100 : null;
+      const covRecords = coreRecords.filter((r) => r.coverageDepths);
+      const meanCov = covRecords.length
+        ? covRecords.reduce((s, r) => s + r.coverageDepths.reduce((a, b) => a + b, 0) / r.coverageDepths.length, 0) / covRecords.length
+        : null;
+      const gcDiff = meanGc !== null ? contigGc - meanGc : null;
+      const covRatio = meanCov !== null && contigCov !== null && meanCov > 0 ? contigCov / meanCov : null;
+
+      // "If this contig were added to this MAG's core set, would each of
+      // its marker families be a new (unique) one, or a duplicate
+      // (redundant) of a family already present elsewhere in the MAG?" —
+      // answered by running the same unique/redundant logic the outlier
+      // card uses, on a synthetic "core set + this contig" grouping.
+      const contributions = computeMarkerContributions([...coreRecords, record]).get(contigId);
+      const markerStatus = contigFamilies.length === 0
+        ? '<span class="hint">none</span>'
+        : contigFamilies
+          .map((fam) => {
+            const isRedundant = contributions.redundantFamilies.includes(fam);
+            return `<span class="marker-tag ${isRedundant ? 'marker-redundant' : 'marker-unique'}" title="${isRedundant ? 'already present elsewhere in this MAG — assigning here would duplicate it' : 'not currently found elsewhere in this MAG — assigning here would raise completeness'}">${fam}</span>`;
+          })
+          .join(' ');
+
+      const isCurrent = currentDecision === magId;
+      return `<tr class="${isCurrent ? 'evidence-row-current' : ''}">
+        <td>${magId} <span class="hint">(${mag.members.map((m) => `${m.tool}:${m.binId}`).join(', ')})</span></td>
+        <td class="num">${meanGc === null ? '<span class="hint">n/a</span>' : `${meanGc.toFixed(1)}%`}</td>
+        <td class="num">${gcDiff === null ? '<span class="hint">n/a</span>' : `${gcDiff > 0 ? '+' : ''}${gcDiff.toFixed(1)}pp`}</td>
+        <td class="num">${meanCov === null ? '<span class="hint">n/a</span>' : meanCov.toFixed(1)}</td>
+        <td class="num">${covRatio === null ? '<span class="hint">n/a</span>' : `${covRatio.toFixed(2)}&times;`}</td>
+        <td>${markerStatus}</td>
+        <td>${isCurrent ? '<strong>current</strong>' : `<button class="act evidence-assign-btn" type="button" data-mag-id="${magId}">Assign here</button>`}</td>
+      </tr>`;
+    })
+    .join('');
+
+  container.innerHTML = `
+    <div class="card evidence-card">
+      <h3>Contig ${contigId}</h3>
+      <div class="row-count">Length ${record.length.toLocaleString()} bp &middot; own GC ${contigGc.toFixed(1)}%${contigCov !== null ? ` &middot; own mean coverage ${contigCov.toFixed(1)}` : ''} &middot; ${candidateMagIds.length > 1 ? `contested between ${candidateMagIds.length} MAGs across ${entry.totalVotes} tool vote(s)` : 'not contested — every voting tool agrees'}</div>
+      <div class="table-wrap scroll-panel">
+        <table class="data-table">
+          <thead><tr>
+            <th>Candidate MAG</th>
+            <th title="Mean GC% of this MAG's other core (unanimous-agreement) contigs">MAG mean GC</th>
+            <th title="This contig's GC% minus the MAG's mean core GC%">GC diff</th>
+            <th title="Mean coverage depth of this MAG's other core contigs">MAG mean cov.</th>
+            <th title="This contig's mean coverage divided by the MAG's mean core coverage">Cov. ratio</th>
+            <th title="This contig's marker-gene families, and whether assigning it here would be a unique contribution or a duplicate">Marker genes</th>
+            <th>Decision</th>
+          </tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <button class="act warn" id="evidenceExcludeBtn" type="button">${currentDecision === EXCLUDED_BIN_ID ? 'Excluded ✓' : 'Exclude from both/all'}</button>
+      </div>
     </div>
-    <h4>Current working bins</h4>
-    <div class="row-count" id="workingBinsNote"></div>
-    <div class="table-wrap scroll-panel" id="workingBinsWrap"></div>
   `;
 
-  function buildDataPoints(xKey, yKey) {
-    return records.map((r) => ({
-      id: r.id, x: AXES[xKey].get(r), y: AXES[yKey].get(r),
-      colorKey: workingAssignment.get(r.id) || 'unbinned',
-    }));
-  }
-
-  function renderWorkingBins() {
-    const { summaries } = computeBinSummaries(records, assignmentToRows(workingAssignment), { thresholds: currentParams.mimag, recallRate: currentParams.recallRate });
-    const rows = summaries
-      .map((b) => `<tr>
-        <td>${b.binId}</td>
-        <td class="num">${b.contigCount.toLocaleString()}</td>
-        <td class="num">${b.totalLength.toLocaleString()}</td>
-        <td class="num">${b.completeness.toFixed(1)}%</td>
-        <td class="num">${b.redundancy.toFixed(1)}%</td>
-        <td>${formatMimagTier(b.mimagTier)}</td>
-      </tr>`)
-      .join('');
-    document.getElementById('workingBinsWrap').innerHTML = `
-      <table class="data-table">
-        <thead><tr><th>Bin</th><th>Contigs</th><th>Length</th><th title="Recall-adjusted — see the Bin summaries card's Completeness column note">Completeness</th><th title="Recall-adjusted — see the Bin summaries card's Redundancy column note">Redundancy</th><th>Tier</th></tr></thead>
-        <tbody>${rows}</tbody>
-      </table>
-    `;
-    const unassignedCount = records.length - workingAssignment.size;
-    document.getElementById('workingBinsNote').textContent =
-      `${summaries.length.toLocaleString()} working bins` +
-      (unassignedCount > 0 ? ` · ${unassignedCount.toLocaleString()} contig(s) not yet assigned to any bin` : '');
-  }
-
-  function refreshTargetBinOptions() {
-    const select = document.getElementById('targetBinSelect');
-    const previousValue = select.value;
-    select.innerHTML = listBinIds(workingAssignment).map((b) => `<option value="${b}">${b}</option>`).join('') +
-      '<option value="__new__">+ New bin…</option>';
-    if ([...select.options].some((o) => o.value === previousValue)) select.value = previousValue;
-  }
-
-  function updateSelectionUI(selectedIds) {
-    const selectionRow = document.getElementById('selectionRow');
-    const actionRow = document.getElementById('actionRow');
-    if (selectedIds.length === 0) {
-      selectionRow.style.display = 'none';
-      actionRow.style.display = 'none';
-      return;
-    }
-    selectionRow.style.display = '';
-    actionRow.style.display = '';
-    document.getElementById('selectionLabel').textContent = `${selectedIds.length.toLocaleString()} contig(s) selected`;
-    refreshTargetBinOptions();
-  }
-
-  scatterPlotHandle = createScatterPlot(
-    document.getElementById('scatterContainer'),
-    buildDataPoints('gcContent', 'length'),
-    { onSelectionChange: updateSelectionUI }
-  );
-
-  function rerenderScatterColors() {
-    const xKey = document.getElementById('scatterX').value;
-    const yKey = document.getElementById('scatterY').value;
-    scatterPlotHandle.setDataPoints(buildDataPoints(xKey, yKey));
-  }
-  document.getElementById('scatterX').addEventListener('change', rerenderScatterColors);
-  document.getElementById('scatterY').addEventListener('change', rerenderScatterColors);
-
-  document.getElementById('applyMoveBtn').addEventListener('click', () => {
-    const selectedIds = scatterPlotHandle.getSelection();
-    if (selectedIds.length === 0) return;
-    let targetBinId = document.getElementById('targetBinSelect').value;
-    if (targetBinId === '__new__') {
-      const name = window.prompt('New bin name:', generateNewBinId(workingAssignment));
-      if (!name) return;
-      targetBinId = name;
-    }
-    workingAssignment = reassignContigs(workingAssignment, selectedIds, targetBinId);
-    rerenderScatterColors();
-    scatterPlotHandle.clearSelection();
-    renderWorkingBins();
+  container.querySelectorAll('.evidence-assign-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      workingAssignment = reassignContigs(workingAssignment, [contigId], btn.dataset.magId);
+      decidedContigIds.add(contigId);
+      renderFilteredExplorer();
+    });
   });
-
-  document.getElementById('clearSelectionBtn').addEventListener('click', () => {
-    scatterPlotHandle.clearSelection();
-  });
-
-  renderWorkingBins();
+  const excludeBtn = document.getElementById('evidenceExcludeBtn');
+  if (excludeBtn) {
+    excludeBtn.addEventListener('click', () => {
+      workingAssignment = reassignContigs(workingAssignment, [contigId], EXCLUDED_BIN_ID);
+      decidedContigIds.add(contigId);
+      renderFilteredExplorer();
+    });
+  }
 }
 
 /**
- * Phase 8: comparison views and QC across the full reconciled set (brief
- * §Comparison and QC) — good-vs-bad side-by-side contig scatter,
- * completeness/contamination scatter across every putative MAG coloured
- * by supporting tools, and the pairwise redundancy check flagging likely
- * duplicate genomes. Only meaningful once cross-tool reconciliation has
- * run (needs `putativeMags`), so callers only invoke this when more than
- * one bin table was loaded. `filteredMagIds` reduces the whole section
- * (good/bad comparison, the completeness/contamination scatter, and the
- * duplicate-genome check) to just the MAGs selected in the MAG-filters
- * panel — the same reduction renderReconciliationCard/initReconciliationNetwork
- * apply, so all three MAG-scoped views stay in sync with each other.
+ * The working assignment (working-assignment.js) is the one live-editable
+ * session state everything in this redesign reads/writes: the MAG picker
+ * table's live numbers, the network's resolved/excluded leaf colouring,
+ * the evidence panel's decisions, and Export. Initialized once per load
+ * (guarded by workingAssignmentInitialized, same as before this
+ * redesign — this used to run lazily inside the old Phase 7 scatter
+ * section, moved here since that section is gone but the same
+ * once-per-load initialization still needs to happen before anything
+ * reads workingAssignment).
  */
-function initQcSection(records, reconciliationResult, filteredMagIds) {
-  const { computeBinSummaries } = window.ClannMAG.binSummary;
-  const { pickComparisonBins, buildMagQcPoints } = window.ClannMAG.qcComparison;
-  const { computeMagRedundancy } = window.ClannMAG.magRedundancy;
-  const { createScatterPlot } = window.ClannMAG.scatter;
-
-  const putativeMags = reconciliationResult.putativeMags.filter((mag) => filteredMagIds.has(mag.magId));
-  const magAssignmentRows = putativeMags.flatMap((mag) =>
-    [...mag.coreContigIds, ...mag.disputedContigIds].map((contigId) => ({ contigId, binId: mag.magId }))
-  );
-  const { summaries: magSummaries } = computeBinSummaries(records, magAssignmentRows, { thresholds: currentParams.mimag, recallRate: currentParams.recallRate });
-
-  const card = document.getElementById('qc-card');
-  card.innerHTML = `
-    <h3>Comparison and QC across putative MAGs</h3>
-    <div class="row-count">${putativeMags.length.toLocaleString()} of ${reconciliationResult.putativeMags.length.toLocaleString()} putative MAGs match the current MAG filters.</div>
-    <h4>Good bin vs. bad bin</h4>
-    <div class="row-count" id="qcComparisonNote"></div>
-    <div class="qc-comparison-row">
-      <div><div class="row-count" id="qcGoodLabel"></div><div id="qcGoodScatter"></div></div>
-      <div><div class="row-count" id="qcBadLabel"></div><div id="qcBadScatter"></div></div>
-    </div>
-    <h4>Completeness vs. contamination, all putative MAGs</h4>
-    <div class="row-count">${magSummaries.length.toLocaleString()} putative MAG(s), coloured by which tool(s) support each one. X axis: completeness % (recall-adjusted). Y axis: redundancy % (contamination proxy, recall-adjusted).</div>
-    <div id="magQcScatter"></div>
-    <h4>Possible duplicate genomes</h4>
-    <div class="row-count" id="redundancyNote"></div>
-    <div class="table-wrap scroll-panel" id="redundancyWrap"></div>
-  `;
-
-  const { good, bad } = pickComparisonBins(magSummaries);
-  document.getElementById('qcComparisonNote').textContent = good && bad
-    ? 'The MAG with the best completeness-minus-redundancy score, plotted against the worst, for a direct visual contrast.'
-    : 'Need at least two putative MAGs with 2+ contigs each to show a comparison.';
-
-  function contigScatterPoints(magId) {
-    const contigIds = new Set(magAssignmentRows.filter((r) => r.binId === magId).map((r) => r.contigId));
-    return records
-      .filter((r) => contigIds.has(r.id))
-      .map((r) => ({ id: r.id, x: r.gcContent * 100, y: Math.log10(Math.max(1, r.length)), colorKey: magId }));
-  }
-
-  if (good && bad) {
-    document.getElementById('qcGoodLabel').textContent =
-      `${good.binId} — completeness ${good.completeness.toFixed(1)}%, redundancy ${good.redundancy.toFixed(1)}%`;
-    document.getElementById('qcBadLabel').textContent =
-      `${bad.binId} — completeness ${bad.completeness.toFixed(1)}%, redundancy ${bad.redundancy.toFixed(1)}%`;
-    createScatterPlot(document.getElementById('qcGoodScatter'), contigScatterPoints(good.binId),
-      { width: 320, height: 260, onSelectionChange: () => {} });
-    createScatterPlot(document.getElementById('qcBadScatter'), contigScatterPoints(bad.binId),
-      { width: 320, height: 260, onSelectionChange: () => {} });
-  }
-
-  createScatterPlot(document.getElementById('magQcScatter'), buildMagQcPoints(magSummaries, putativeMags),
-    { width: 640, height: 360, onSelectionChange: () => {} });
-
-  const redundancyPairs = computeMagRedundancy(records, putativeMags, { similarityThreshold: currentParams.magDuplicateSimilarity });
-  const flaggedPairs = redundancyPairs.filter((p) => p.likelyDuplicate);
-  document.getElementById('redundancyNote').textContent = flaggedPairs.length > 0
-    ? `${flaggedPairs.length.toLocaleString()} pair(s) of putative MAGs have near-identical composition — worth checking whether they're the same organism split across bins.`
-    : 'No putative MAG pairs look like the same organism split across separate bins (by composition similarity).';
-  document.getElementById('redundancyWrap').innerHTML = redundancyPairs.length === 0 ? '' : `
-    <table class="data-table">
-      <thead><tr><th>MAG A</th><th>MAG B</th><th>Composition similarity</th><th>Mean GC difference</th><th>Flag</th></tr></thead>
-      <tbody>${redundancyPairs.map((p) => `<tr>
-        <td>${p.magIdA}</td>
-        <td>${p.magIdB}</td>
-        <td class="num">${p.compositionSimilarity.toFixed(3)}</td>
-        <td class="num">${(p.meanGcDiff * 100).toFixed(2)}%</td>
-        <td>${p.likelyDuplicate ? '⚠ possible duplicate' : ''}</td>
-      </tr>`).join('')}</tbody>
-    </table>
-  `;
+function ensureWorkingAssignment() {
+  if (workingAssignmentInitialized) return;
+  const { deriveInitialAssignment } = window.ClannMAG.workingAssignment;
+  workingAssignment = deriveInitialAssignment(latest.binTablesByTool, latest.reconciliationResult);
+  workingAssignmentInitialized = true;
 }
 
 /** Triggers a browser save of `blob` as `filename` via a throwaway object URL. */
@@ -903,8 +847,7 @@ function renderMagFiltersSection() {
  * Renders the Thresholds & parameters UI into #paramsSectionBody: every
  * global cutoff a student might want to see the effect of moving (MIMAG
  * quality-tier thresholds, the cross-tool bin-matching overlap threshold,
- * outlier-flagging thresholds, and the duplicate-MAG similarity
- * threshold). Changing minJaccard re-runs bin matching itself
+ * and outlier-flagging thresholds). Changing minJaccard re-runs bin matching itself
  * (recomputeLatest); every other field only changes what gets displayed
  * from already-computed data, so those just re-render.
  */
@@ -922,7 +865,6 @@ function renderParamsSection() {
     <div class="row"><label title="Reciprocal-best-hit overlap required before two tools' bins are matched as the same putative MAG">Min bin-match Jaccard</label><input type="number" id="paramMinJaccard" min="0" max="1" step="0.01" value="${p.minJaccard}"></div>
     <div class="row"><label title="Composition/coverage z-score above which a contig counts as an outlier flag">Outlier Z threshold</label><input type="number" id="paramZThreshold" min="0" step="0.1" value="${p.outlier.zThreshold}"></div>
     <div class="row"><label title="Marker-gene taxonomic distance above which a contig counts as an outlier flag">Tax. distance threshold</label><input type="number" id="paramTaxDistance" min="0" step="1" value="${p.outlier.taxDistanceThreshold}"></div>
-    <div class="row"><label title="Composition similarity above which two MAGs are flagged as likely duplicates">Duplicate-MAG similarity ≥</label><input type="number" id="paramMagSimilarity" min="0" max="1" step="0.01" value="${p.magDuplicateSimilarity}"></div>
     <div class="row"><button class="act" id="paramResetBtn" type="button">Reset to defaults</button></div>
   `;
 
@@ -946,7 +888,6 @@ function renderParamsSection() {
         zThreshold: num('paramZThreshold', currentParams.outlier.zThreshold),
         taxDistanceThreshold: num('paramTaxDistance', currentParams.outlier.taxDistanceThreshold),
       },
-      magDuplicateSimilarity: num('paramMagSimilarity', currentParams.magDuplicateSimilarity),
       recallRate: Math.max(0.01, Math.min(1, num('paramRecallRate', currentParams.recallRate))),
     };
     if (currentParams.minJaccard !== previousMinJaccard) {
@@ -971,40 +912,39 @@ function renderParamsSection() {
 
 /**
  * Builds the right-pane analysis sections from `latest` (everything
- * filter-independent, computed once per load) restricted to whatever
- * currently passes `currentFilters` — the tables and the reconciliation
- * network only ever show the filtered subset (brief's left-pane-filters/
- * right-pane-view split). Re-run on every filter change; cheap enough
- * (array filter + string templating over records already in memory, no
- * re-parsing or re-searching) to do synchronously on each keystroke's
- * debounced callback.
+ * filter-independent, computed once per load). Re-run on every filter,
+ * param, MAG-selection, or working-assignment change; cheap enough (array
+ * filter + string templating over records already in memory, no
+ * re-parsing or re-searching) to do synchronously each time.
  *
- * Scope: contig filtering covers the read-only analysis views (per-contig
- * table, bin summaries, reconciliation, outlier flagging). MAG filtering
- * (`currentMagFilters`, a separate axis over the reconciliation table's
- * own columns) additionally reduces the reconciliation card, the
- * agreement network, and the QC section to just the selected MAGs. The
- * interactive refine/export sections below keep operating on the full
- * working assignment regardless of either filter — reassigning or
- * exporting a contig/MAG that's merely hidden by a filter would be
- * surprising, so those sections are session state, not a filtered view
- * of it.
+ * Scope: `currentFilters` (left-pane contig filters) only ever narrows the
+ * collapsed "All contigs" raw table at the bottom — every other view here
+ * (the MAG picker, the contig network, the outlier card, Export) is keyed
+ * off `selectedMagId`/the working assignment instead, not the contig
+ * filters, since those views work at MAG/session-state granularity, not
+ * per-contig-property granularity. `currentMagFilters` (left-pane MAG
+ * filters) narrows which MAGs appear in the picker table — its job, per
+ * the redesign, is helping find a MAG to select.
  */
 function renderFilteredExplorer() {
-  const { records, binTablesByTool, tools, reconciliationResult, outlierFlags, outlierMeta, binIndex, agreementByContigId } = latest;
+  const { records, tools, reconciliationResult, outlierFlags, outlierMeta, binIndex, agreementByContigId } = latest;
+  ensureWorkingAssignment();
+
   const { applyFilters } = window.ClannMAG.filters;
   const filteredRecords = applyFilters(records, currentFilters, { binIndex, agreementByContigId });
-  const filteredIds = new Set(filteredRecords.map((r) => r.id));
 
-  document.getElementById('filterSummary').textContent =
-    `${filteredRecords.length.toLocaleString()} of ${records.length.toLocaleString()} contigs match the current filters.`;
+  const filterSummaryEl = document.getElementById('filterSummary');
+  if (filterSummaryEl) {
+    filterSummaryEl.textContent =
+      `${filteredRecords.length.toLocaleString()} of ${records.length.toLocaleString()} contigs match the current filters (applies to the raw contig table below).`;
+  }
 
   const sorted = [...filteredRecords].sort((a, b) => b.length - a.length);
-  const totalLength = sorted.reduce((sum, r) => sum + r.length, 0);
-  const n50 = computeN50(sorted.map((r) => r.length), totalLength);
-  const meanGc = sorted.length ? sorted.reduce((sum, r) => sum + r.gcContent, 0) / sorted.length : 0;
-  const contigsWithMarkers = sorted.filter((r) => r.markerHits && r.markerHits.length > 0).length;
-  const distinctFamiliesHit = new Set(sorted.flatMap((r) => (r.markerHits || []).map((h) => h.family))).size;
+  const totalLength = records.reduce((sum, r) => sum + r.length, 0);
+  const n50 = computeN50([...records].sort((a, b) => b.length - a.length).map((r) => r.length), totalLength);
+  const meanGc = records.length ? records.reduce((sum, r) => sum + r.gcContent, 0) / records.length : 0;
+  const contigsWithMarkers = records.filter((r) => r.markerHits && r.markerHits.length > 0).length;
+  const distinctFamiliesHit = new Set(records.flatMap((r) => (r.markerHits || []).map((h) => h.family))).size;
 
   const explorer = document.getElementById('explorer');
   const rows = sorted
@@ -1019,13 +959,6 @@ function renderFilteredExplorer() {
     </tr>`)
     .join('');
 
-  const perToolBinCards = tools
-    .map((tool) => {
-      const filteredAssignments = binTablesByTool.get(tool).filter((a) => filteredIds.has(a.contigId));
-      return renderBinSummaryCard(records, filteredAssignments, tools.length > 1 ? tool : null);
-    })
-    .join('');
-
   let magSummaryData = [];
   let filteredMagIds = new Set();
   if (reconciliationResult) {
@@ -1034,17 +967,19 @@ function renderFilteredExplorer() {
     filteredMagIds = new Set(applyMagFilters(magSummaryData, currentMagFilters).map((m) => m.magId));
   }
   const reconciliationCard = reconciliationResult
-    ? renderReconciliationCard(records, reconciliationResult, filteredIds, magSummaryData, filteredMagIds)
+    ? renderReconciliationCard(records, reconciliationResult, magSummaryData, filteredMagIds)
     : '';
 
+  const neighborhood = (reconciliationResult && selectedMagId) ? buildMagNeighborhood(selectedMagId, reconciliationResult) : null;
+  const neighborhoodContigIds = neighborhood ? new Set(neighborhood.leaves.map((l) => l.id)) : null;
   const rankedOutlierFlags = applyOutlierThresholds(outlierFlags, currentParams.outlier);
-  const filteredOutlierFlags = rankedOutlierFlags.filter((f) => filteredIds.has(f.contigId));
-  const outlierCard = tools.length > 0 ? renderOutlierCard(filteredOutlierFlags, outlierMeta) : '';
+  const scopedOutlierFlags = neighborhoodContigIds ? rankedOutlierFlags.filter((f) => neighborhoodContigIds.has(f.contigId)) : [];
+  const outlierCard = tools.length > 0 ? renderOutlierCard(scopedOutlierFlags, outlierMeta, selectedMagId) : '';
 
   explorer.innerHTML = `
     <div class="card">
-      <h3>Assembly summary${records.length !== filteredRecords.length ? ' (filtered)' : ''}</h3>
-      <div class="row"><label>Contigs</label><strong>${sorted.length.toLocaleString()}</strong></div>
+      <h3>Assembly summary</h3>
+      <div class="row"><label>Contigs</label><strong>${records.length.toLocaleString()}</strong></div>
       <div class="row"><label>Total length</label><strong>${totalLength.toLocaleString()} bp</strong></div>
       <div class="row"><label>N50</label><strong>${n50.toLocaleString()} bp</strong></div>
       <div class="row"><label>Mean GC</label><strong>${(meanGc * 100).toFixed(1)}%</strong></div>
@@ -1053,25 +988,22 @@ function renderFilteredExplorer() {
     </div>
     ${reconciliationCard}
     ${outlierCard}
-    ${tools.length > 0 ? '<div class="card" id="interactive-card"></div>' : ''}
-    ${reconciliationResult ? '<div class="card" id="qc-card"></div>' : ''}
     ${tools.length > 0 ? '<div class="card" id="export-card"></div>' : ''}
-    ${perToolBinCards}
     <div class="card">
-      <h3>Per-contig properties</h3>
-      <div class="row-count">${sorted.length.toLocaleString()} of ${records.length.toLocaleString()} contigs match the current filters, longest first</div>
-      <div class="table-wrap scroll-panel">
-        <table class="data-table">
-          <thead><tr><th>Contig</th><th>Length</th><th>GC%</th><th>GC skew</th><th>Coding density</th><th>Marker genes</th><th title="Non-uniform FASTA line wrapping">⚠</th></tr></thead>
-          <tbody>${rows}</tbody>
-        </table>
-      </div>
+      <details id="allContigsDetails">
+        <summary><h3 style="display:inline-block;margin:0">All contigs (raw table)</h3></summary>
+        <div class="row-count" style="margin-top:8px">${sorted.length.toLocaleString()} of ${records.length.toLocaleString()} contigs match the current contig filters, longest first</div>
+        <div class="table-wrap scroll-panel">
+          <table class="data-table">
+            <thead><tr><th>Contig</th><th>Length</th><th>GC%</th><th>GC skew</th><th>Coding density</th><th>Marker genes</th><th title="Non-uniform FASTA line wrapping">⚠</th></tr></thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>
+      </details>
     </div>
   `;
 
-  if (reconciliationResult) initReconciliationNetwork(reconciliationResult, filteredIds, filteredMagIds);
-  if (tools.length > 0) initInteractiveSection(records, binTablesByTool, reconciliationResult);
-  if (reconciliationResult) initQcSection(records, reconciliationResult, filteredMagIds);
+  if (reconciliationResult) initMagNetwork(reconciliationResult, neighborhood, records);
   if (tools.length > 0) initExportSection();
 }
 
@@ -1111,11 +1043,18 @@ async function recomputeLatest(records, binTablesByTool) {
   const { buildBinIndex } = window.ClannMAG.filters;
   const binIndex = buildBinIndex(binTablesByTool);
   const agreementByContigId = new Map();
+  const contigAgreementEntryByContigId = new Map();
   if (reconciliationResult) {
-    for (const c of reconciliationResult.contigAgreement) agreementByContigId.set(c.contigId, c.agreementFraction);
+    for (const c of reconciliationResult.contigAgreement) {
+      agreementByContigId.set(c.contigId, c.agreementFraction);
+      contigAgreementEntryByContigId.set(c.contigId, c);
+    }
   }
 
-  latest = { records, binTablesByTool, tools, reconciliationResult, outlierFlags, outlierMeta, binIndex, agreementByContigId };
+  latest = {
+    records, binTablesByTool, tools, reconciliationResult, outlierFlags, outlierMeta, binIndex,
+    agreementByContigId, contigAgreementEntryByContigId,
+  };
 }
 
 /**
@@ -1236,6 +1175,9 @@ function loadAssembly(file, binTablesByTool, coverageTable, krakenCalls) {
     currentAssemblyFile = file;
     workingAssignmentInitialized = false;
     networkAlgorithm = 'ring';
+    selectedMagId = null;
+    selectedContigId = null;
+    decidedContigIds = new Set();
 
     worker.onmessage = async (e) => {
       const msg = e.data;
@@ -1422,7 +1364,21 @@ function applyOutlierThresholds(flags, outlierParams) {
   return withCounts;
 }
 
-function renderOutlierCard(flags, { hasCoverage, hasTaxonomy, hasKraken, hasCrossTool }) {
+/**
+ * Scoped, per the redesign, to whichever MAG is currently selected in the
+ * picker table (the caller filters `flags` down to that MAG's network
+ * neighborhood before calling this — see renderFilteredExplorer) rather
+ * than showing every contig in the assembly at once.
+ */
+function renderOutlierCard(flags, { hasCoverage, hasTaxonomy, hasKraken, hasCrossTool }, selectedMagId) {
+  if (!selectedMagId) {
+    return `
+      <div class="card">
+        <h3>Outlier &amp; disagreement flagging</h3>
+        <div class="hint">Select a putative MAG above to see outlier/disagreement flags for its contigs.</div>
+      </div>
+    `;
+  }
   const ROW_LIMIT = 150;
   const rows = flags
     .slice(0, ROW_LIMIT)
@@ -1450,7 +1406,7 @@ function renderOutlierCard(flags, { hasCoverage, hasTaxonomy, hasKraken, hasCros
 
   return `
     <div class="card">
-      <h3>Outlier &amp; disagreement flagging</h3>
+      <h3>Outlier &amp; disagreement flagging — ${selectedMagId}'s neighborhood</h3>
       <div class="row-count">${flags.length.toLocaleString()} contigs scored${flags.length > ROW_LIMIT ? `, showing the top ${ROW_LIMIT} by flag count` : ''} &middot; ${notes.join(' &middot; ')}</div>
       <div class="table-wrap scroll-panel">
         <table class="data-table">
@@ -1624,9 +1580,28 @@ function initSortableTables() {
   });
 }
 
+/**
+ * Delegated (survives renderReconciliationCard's wholesale innerHTML
+ * rebuilds — same reasoning as initSortableTables above) click handler for
+ * the MAG picker table's row-select buttons. Clicking the already-selected
+ * MAG deselects it (toggle), clearing the network/evidence panel back to
+ * the "pick a MAG" hint state.
+ */
+function initMagPicker() {
+  document.addEventListener('click', (e) => {
+    const btn = e.target.closest('.mag-picker-select');
+    if (!btn || !latest) return;
+    const magId = btn.dataset.magId;
+    selectedMagId = selectedMagId === magId ? null : magId;
+    selectedContigId = null;
+    renderFilteredExplorer();
+  });
+}
+
 document.addEventListener('DOMContentLoaded', () => {
   initTheme();
   initFilePicker();
   initSortableTables();
+  initMagPicker();
 });
 })();

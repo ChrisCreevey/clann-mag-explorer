@@ -177,18 +177,39 @@ main > *, #wrap, #explorer, .card{min-width:0}
 .row-count{color:var(--muted);font-size:11.5px;margin:0 0 6px 0}
 .empty-state{color:var(--muted);font-size:12.5px}
 
-.qc-comparison-row{display:flex;gap:16px;flex-wrap:wrap;margin-bottom:12px}
-.qc-comparison-row > div{flex:1 1 320px;min-width:280px}
-.empty-note{color:var(--muted);font-style:italic;padding:12px}
-
 /* ---- Cross-tool reconciliation bipartite network ---- */
 .network-wrap{margin-bottom:12px}
-.network-hub{fill:var(--panel);stroke:var(--ink);stroke-width:1.6}
+.network-hub{fill:var(--panel);stroke:var(--ink);stroke-width:1.6;cursor:pointer}
 .network-hub-label{fill:var(--ink);font-size:10px;font-family:var(--font-mono)}
-.network-leaf{fill:var(--muted);stroke:var(--bg);stroke-width:0.6}
+.network-leaf{stroke:var(--bg);stroke-width:0.6;cursor:pointer}
+.network-leaf-core{fill:var(--muted);opacity:.55}
+.network-leaf-disputed{fill:var(--clay-500);opacity:.9}
+:root[data-theme="dark"] .network-leaf-disputed{fill:var(--clay-400)}
+.network-leaf-resolved{fill:var(--moss-500);stroke:var(--moss-500);stroke-width:1.4}
+:root[data-theme="dark"] .network-leaf-resolved{fill:var(--moss-300);stroke:var(--moss-300)}
+.network-leaf-excluded{fill:var(--line);opacity:.6;stroke-dasharray:1.5,1}
 .network-legend{display:flex;flex-wrap:wrap;gap:10px 14px;margin-top:6px;font-size:11.5px;color:var(--muted)}
 .network-legend-item{display:inline-flex;align-items:center;gap:5px}
 .network-swatch{width:9px;height:9px;border-radius:2px;display:inline-block}
+
+/* ---- MAG picker table (cross-tool reconciliation card) ---- */
+.mag-picker-row-selected{background:color-mix(in srgb, var(--accent) 12%, transparent)}
+.mag-picker-select{width:auto;padding:2px 9px;font-family:var(--font-mono);font-size:11.5px}
+
+/* ---- Contig evidence panel (click a contig in the network) ---- */
+.evidence-card{margin-top:12px;border-color:var(--accent)}
+.evidence-row-current{background:color-mix(in srgb, var(--accent) 10%, transparent)}
+.marker-tag{display:inline-block;padding:1px 7px;border-radius:8px;font-size:10.5px;margin:0 3px 3px 0}
+.marker-unique{background:color-mix(in srgb, var(--moss-500) 18%, transparent);color:var(--moss-500)}
+:root[data-theme="dark"] .marker-unique{background:color-mix(in srgb, var(--moss-300) 20%, transparent);color:var(--moss-300)}
+.marker-redundant{background:color-mix(in srgb, var(--amber-500) 18%, transparent);color:var(--amber-500)}
+:root[data-theme="dark"] .marker-redundant{background:color-mix(in srgb, var(--amber-400) 20%, transparent);color:var(--amber-400)}
+
+/* ---- Collapsible raw contig table ---- */
+.card details>summary{cursor:pointer;list-style:none;display:flex;align-items:center;gap:6px}
+.card details>summary::-webkit-details-marker{display:none}
+.card details>summary::before{content:"▸";font-size:9px;color:var(--muted);transition:transform 120ms}
+.card details[open]>summary::before{transform:rotate(90deg)}
 
 @media (max-width: 760px){
   main{flex-direction:column;overflow:auto}
@@ -210,8 +231,3 @@ main > *, #wrap, #explorer, .card{min-width:0}
 :root[data-theme="dark"] .mimag-tier-medium{background:color-mix(in srgb, var(--amber-400) 22%, transparent);color:var(--amber-400)}
 .mimag-tier-low{background:color-mix(in srgb, var(--clay-500) 18%, transparent);color:var(--clay-500)}
 :root[data-theme="dark"] .mimag-tier-low{background:color-mix(in srgb, var(--clay-400) 22%, transparent);color:var(--clay-400)}
-
-/* ---- Interactive reassignment scatter plot (Phase 7) ---- */
-#scatterContainer{border:1px solid var(--line);border-radius:6px;background:var(--panel);margin:8px 0}
-#scatterContainer svg{border-radius:6px}
-.scatter-selection-rect{fill:color-mix(in srgb, var(--accent) 15%, transparent);stroke:var(--accent);stroke-width:1;stroke-dasharray:3 2}

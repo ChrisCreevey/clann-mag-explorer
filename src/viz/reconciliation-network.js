@@ -2,13 +2,20 @@
   'use strict';
 
 // Cross-tool reconciliation bipartite network: MAG hubs as central nodes,
-// disputed contigs as leaves around them, one coloured edge per tool that
-// voted a given contig into a given MAG (brief's core feature, "for each
-// contig, how many of the loaded binning tools agree on where it
-// belongs" — this makes that agreement structure visible directly, rather
-// than read off an agreement-fraction table column). Pure DOM/SVG wiring
-// on top of network-geometry.js's layouts, same split as scatter.js over
-// scatter-geometry.js.
+// a selected MAG's contigs (and any other MAG its disputed contigs also
+// touch) as leaves around them, one coloured edge per tool that voted a
+// given contig into a given MAG — this makes that agreement structure
+// visible directly, rather than read off an agreement-fraction table
+// column. app.js's buildMagNeighborhood decides which MAGs/contigs are in
+// scope; this module only draws whatever leaf/hub/edge set it's handed.
+// Pure DOM/SVG wiring on top of network-geometry.js's layouts.
+//
+// Each leaf carries a `state` (app.js's buildMagNeighborhood): 'core' (only
+// ever voted into one shown MAG — nothing to decide, drawn smaller/dimmer),
+// 'disputed' (2+ shown MAGs, no decision made yet), 'resolved' (2+ shown
+// MAGs, the student assigned it via the evidence panel), or 'excluded'
+// (removed from consideration entirely) — see the .network-leaf-* classes
+// in styles/main.css.
 //
 // Draggable, asymmetrically: dragging a MAG hub is "move this genome and
 // everything currently blamed on it", so its connected leaves are dragged
@@ -16,16 +23,21 @@
 // this one contig out of the way", so it moves alone. That asymmetry is
 // the point, not an inconsistency: a hub carries its leaves because the
 // leaves' positions are being read *relative to* their hub, while a leaf
-// has no dependents of its own to carry.
+// has no dependents of its own to carry. A plain click (not a drag) on a
+// leaf or hub instead fires `options.onLeafClick`/`onHubClick`, if given —
+// app.js uses these to open the contig evidence panel, or to jump the
+// network to a different MAG's own neighborhood.
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 const HUES = [200, 20, 150, 280, 50, 320, 100, 250, 0, 170];
 
 /**
  * @param {HTMLElement} container
- * @param {{hubs:{id:string,label:string}[], leaves:{id:string,hubIds:string[]}[],
+ * @param {{hubs:{id:string,label:string}[],
+ *           leaves:{id:string,hubIds:string[],state?:'core'|'disputed'|'resolved'|'excluded'}[],
  *           edges:{leafId:string,hubId:string,tool:string}[]}} data
- * @param {{width?:number, height?:number, algorithm?: 'ring'|'petal'|'force'}} options
+ * @param {{width?:number, height?:number, algorithm?: 'ring'|'petal'|'force',
+ *           onLeafClick?: (leafId:string)=>void, onHubClick?: (hubId:string)=>void}} options
  */
 function createReconciliationNetwork(container, data, options = {}) {
   const { layoutNetwork } = self.ClannMAG.networkGeometry;
@@ -37,7 +49,7 @@ function createReconciliationNetwork(container, data, options = {}) {
 
   const { hubs, leaves, edges } = data;
   if (leaves.length === 0) {
-    container.innerHTML = '<div class="hint">No disputed contigs to show for the current filters.</div>';
+    container.innerHTML = '<div class="hint">No contigs to show for this MAG.</div>';
     return;
   }
 
@@ -54,7 +66,7 @@ function createReconciliationNetwork(container, data, options = {}) {
 
   const legend = document.createElement('div');
   legend.className = 'network-legend';
-  legend.innerHTML = `<span class="hint">Drag a MAG to move it with its contigs; drag a contig to move just that one.</span>` + tools
+  legend.innerHTML = `<span class="hint">Click a contig to compare evidence, click a MAG to explore its own neighborhood. Drag a MAG to move it with its contigs; drag a contig to move just that one.</span>` + tools
     .map((t) => `<span class="network-legend-item"><span class="network-swatch" style="background:hsl(${hueByTool.get(t)},60%,50%)"></span>${t}</span>`)
     .join('');
   wrap.appendChild(legend);
@@ -171,26 +183,33 @@ function createReconciliationNetwork(container, data, options = {}) {
     g.append(circle, label);
     g.addEventListener('mouseenter', () => setHighlight(edgesByHub.get(hub.id)));
     g.addEventListener('mouseleave', () => setHighlight(null));
+    if (options.onHubClick) g.addEventListener('click', () => options.onHubClick(hub.id));
     const title = document.createElementNS(SVG_NS, 'title');
-    title.textContent = `${hub.label} — ${(edgesByHub.get(hub.id) || []).length} vote(s) from disputed contigs shown. Drag to move it with its contigs.`;
+    title.textContent = `${hub.label} — ${(edgesByHub.get(hub.id) || []).length} vote(s) shown. Drag to move it with its contigs.${options.onHubClick ? ' Click to explore its own neighborhood.' : ''}`;
     g.appendChild(title);
     hubsGroup.appendChild(g);
     hubEls.set(hub.id, { g, circle, label });
   }
 
+  const LEAF_STATE_LABELS = {
+    core: 'unanimous core contig', disputed: 'disputed — needs a decision',
+    resolved: 'resolved by you', excluded: 'excluded by you',
+  };
   const leafEls = new Map();
   for (const leaf of leaves) {
     const p = leafPositions.get(leaf.id);
     if (!p) continue;
+    const state = leaf.state || 'disputed';
     const g = document.createElementNS(SVG_NS, 'g');
     const circle = document.createElementNS(SVG_NS, 'circle');
-    circle.setAttribute('cx', p.x); circle.setAttribute('cy', p.y); circle.setAttribute('r', '3');
-    circle.setAttribute('class', 'network-leaf');
+    circle.setAttribute('cx', p.x); circle.setAttribute('cy', p.y); circle.setAttribute('r', state === 'core' ? '2.5' : '3.5');
+    circle.setAttribute('class', `network-leaf network-leaf-${state}`);
     g.appendChild(circle);
     g.addEventListener('mouseenter', () => setHighlight(edgesByLeaf.get(leaf.id)));
     g.addEventListener('mouseleave', () => setHighlight(null));
+    if (options.onLeafClick) g.addEventListener('click', () => options.onLeafClick(leaf.id));
     const title = document.createElementNS(SVG_NS, 'title');
-    title.textContent = `${leaf.id} — voted into ${leaf.hubIds.length} different MAG(s) across tools. Drag to move just this contig.`;
+    title.textContent = `${leaf.id} (${LEAF_STATE_LABELS[state]}) — voted into ${leaf.hubIds.length} MAG(s) across tools. Drag to move just this contig.${options.onLeafClick ? ' Click to compare evidence.' : ''}`;
     g.appendChild(title);
     leavesGroup.appendChild(g);
     leafEls.set(leaf.id, { g, circle });
