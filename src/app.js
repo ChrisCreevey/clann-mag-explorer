@@ -375,22 +375,22 @@ function renderReconciliationCard(records, result, magSummaryData, filteredMagId
   return `
     <div class="card">
       <h3>Cross-tool reconciliation</h3>
-      <div class="row-count">${tools.length} tools loaded (${tools.join(', ')}) &middot; ${magSummaryData.length.toLocaleString()} putative MAGs matched by contig overlap (reciprocal best hit, min Jaccard ${currentParams.minJaccard}) &middot; ${filteredMagIds.size.toLocaleString()} of ${magSummaryData.length.toLocaleString()} match the current MAG filters &middot; select a MAG to explore it below. Currently assigned/Length (bp)/N50/Completeness/Redundancy/Held here/Held elsewhere/Excluded reflect your current working decisions (see Export); Undisputed/Total associated/Unresolved are the original cross-tool vote counts (Unresolved only shrinks as ties get decided).</div>
+      <div class="row-count">${tools.length} tools loaded (${tools.join(', ')}) &middot; ${magSummaryData.length.toLocaleString()} putative MAGs matched by contig overlap (reciprocal best hit, min Jaccard ${currentParams.minJaccard}) &middot; ${filteredMagIds.size.toLocaleString()} of ${magSummaryData.length.toLocaleString()} match the current MAG filters &middot; select a MAG to explore it below. Currently assigned/Length (bp)/N50 (bp)/Completeness/Redundancy/Held here/Held elsewhere/Excluded reflect your current working decisions (see Export); Undisputed/Total associated/Unresolved are the original cross-tool vote counts (Unresolved only shrinks as ties get decided).</div>
       <div class="table-wrap scroll-panel">
         <table class="data-table" id="magPickerTable">
           <thead><tr>
             <th title="Include this MAG in the export (unticking also excludes any contigs currently assigned to it)">Export</th>
             <th class="num">#</th>
             <th>Putative MAG</th>
-            <th class="num" title="Contigs currently assigned here in your working decisions (Undisputed + Held here + your decisions) — always found within Total associated">Currently assigned</th>
+            <th class="num" title="Contigs currently assigned here in your working decisions (Undisputed + Held here + your decisions) — always found within Total associated">Currently assigned (contigs)</th>
             <th class="num" title="Total length (bp) of the contigs currently assigned here — same working-decision scope as Currently assigned, so it moves as you resolve contigs">Length (bp)</th>
-            <th class="num" title="N50 of the contigs currently assigned here — same working-decision scope as Currently assigned">N50</th>
-            <th class="num" title="Every contig any tool voted for this MAG, win or lose — what the contig network below actually shows. Can be far larger than Currently assigned: an unmatched bin still votes for all its own contigs even when other tools outvote it on nearly all of them.">Total associated</th>
-            <th class="num" title="Every voting tool originally agreed this contig belongs to this MAG — no dispute at all">Undisputed</th>
-            <th class="num" title="Disputed, and currently assigned to THIS MAG — either today's majority-vote default or your explicit decision">Held here</th>
-            <th class="num" title="Disputed, and currently assigned to a DIFFERENT MAG — either today's majority-vote default or your explicit decision">Held elsewhere</th>
-            <th class="num" title="Disputed with no majority vote at all (a tie) and no decision made yet — genuinely still open">Unresolved</th>
-            <th class="num" title="You explicitly excluded this contig from both/all MAGs">Excluded</th>
+            <th class="num" title="N50 of the contigs currently assigned here — same working-decision scope as Currently assigned">N50 (bp)</th>
+            <th class="num" title="Every contig any tool voted for this MAG, win or lose — what the contig network below actually shows. Can be far larger than Currently assigned: an unmatched bin still votes for all its own contigs even when other tools outvote it on nearly all of them.">Total associated (contigs)</th>
+            <th class="num" title="Every voting tool originally agreed this contig belongs to this MAG — no dispute at all">Undisputed (contigs)</th>
+            <th class="num" title="Disputed, and currently assigned to THIS MAG — either today's majority-vote default or your explicit decision">Held here (contigs)</th>
+            <th class="num" title="Disputed, and currently assigned to a DIFFERENT MAG — either today's majority-vote default or your explicit decision">Held elsewhere (contigs)</th>
+            <th class="num" title="Disputed with no majority vote at all (a tie) and no decision made yet — genuinely still open">Unresolved (contigs)</th>
+            <th class="num" title="You explicitly excluded this contig from both/all MAGs">Excluded (contigs)</th>
             <th class="num" title="Recall-adjusted, from the current working assignment — see Thresholds & parameters">Completeness</th>
             <th class="num" title="Recall-adjusted, from the current working assignment — see Thresholds & parameters">Redundancy</th>
             <th>Tier</th>
