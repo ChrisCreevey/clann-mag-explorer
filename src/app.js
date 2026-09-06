@@ -311,6 +311,8 @@ function computeMagSummaryData(records, result) {
       disputedCount: heldHereCount + heldElsewhereCount + unresolvedDisputedCount + excludedCount,
       inNetworkCount: totalAssociated.size,
       liveContigCount: live ? live.contigCount : 0,
+      liveTotalLength: live ? live.totalLength : 0,
+      liveN50: live ? live.n50 : 0,
       completeness: live ? live.completeness : 0,
       redundancy: live ? live.redundancy : 0,
       tier: live ? live.mimagTier : 'low',
@@ -354,6 +356,8 @@ function renderReconciliationCard(records, result, magSummaryData, filteredMagId
         <td class="num">${m.rank}</td>
         <td><button class="act mag-picker-select" type="button" data-mag-id="${m.magId}">${isSelected ? '● ' : ''}${m.magId}</button></td>
         <td class="num">${m.liveContigCount.toLocaleString()}</td>
+        <td class="num">${m.liveTotalLength.toLocaleString()}</td>
+        <td class="num">${m.liveN50.toLocaleString()}</td>
         <td class="num">${m.inNetworkCount.toLocaleString()}</td>
         <td class="num">${m.coreCount.toLocaleString()}</td>
         <td class="num">${m.heldHereCount.toLocaleString()}</td>
@@ -371,7 +375,7 @@ function renderReconciliationCard(records, result, magSummaryData, filteredMagId
   return `
     <div class="card">
       <h3>Cross-tool reconciliation</h3>
-      <div class="row-count">${tools.length} tools loaded (${tools.join(', ')}) &middot; ${magSummaryData.length.toLocaleString()} putative MAGs matched by contig overlap (reciprocal best hit, min Jaccard ${currentParams.minJaccard}) &middot; ${filteredMagIds.size.toLocaleString()} of ${magSummaryData.length.toLocaleString()} match the current MAG filters &middot; select a MAG to explore it below. Currently assigned/Completeness/Redundancy/Held here/Held elsewhere/Excluded reflect your current working decisions (see Export); Undisputed/Total associated/Unresolved are the original cross-tool vote counts (Unresolved only shrinks as ties get decided).</div>
+      <div class="row-count">${tools.length} tools loaded (${tools.join(', ')}) &middot; ${magSummaryData.length.toLocaleString()} putative MAGs matched by contig overlap (reciprocal best hit, min Jaccard ${currentParams.minJaccard}) &middot; ${filteredMagIds.size.toLocaleString()} of ${magSummaryData.length.toLocaleString()} match the current MAG filters &middot; select a MAG to explore it below. Currently assigned/Length (bp)/N50/Completeness/Redundancy/Held here/Held elsewhere/Excluded reflect your current working decisions (see Export); Undisputed/Total associated/Unresolved are the original cross-tool vote counts (Unresolved only shrinks as ties get decided).</div>
       <div class="table-wrap scroll-panel">
         <table class="data-table" id="magPickerTable">
           <thead><tr>
@@ -379,6 +383,8 @@ function renderReconciliationCard(records, result, magSummaryData, filteredMagId
             <th class="num">#</th>
             <th>Putative MAG</th>
             <th class="num" title="Contigs currently assigned here in your working decisions (Undisputed + Held here + your decisions) — always found within Total associated">Currently assigned</th>
+            <th class="num" title="Total length (bp) of the contigs currently assigned here — same working-decision scope as Currently assigned, so it moves as you resolve contigs">Length (bp)</th>
+            <th class="num" title="N50 of the contigs currently assigned here — same working-decision scope as Currently assigned">N50</th>
             <th class="num" title="Every contig any tool voted for this MAG, win or lose — what the contig network below actually shows. Can be far larger than Currently assigned: an unmatched bin still votes for all its own contigs even when other tools outvote it on nearly all of them.">Total associated</th>
             <th class="num" title="Every voting tool originally agreed this contig belongs to this MAG — no dispute at all">Undisputed</th>
             <th class="num" title="Disputed, and currently assigned to THIS MAG — either today's majority-vote default or your explicit decision">Held here</th>
