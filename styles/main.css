@@ -159,9 +159,11 @@ footer#foot .like .like-ico{color:var(--amber-400)}
 
 /* ---- Tables (generic data-table look) ---- */
 table.data-table{width:100%;border-collapse:collapse;font-size:12.5px}
-table.data-table th,table.data-table td{padding:5px 8px;border-bottom:1px solid var(--line);text-align:left;white-space:nowrap}
+table.data-table th,table.data-table td{padding:5px 8px;border-bottom:1px solid var(--line);text-align:left}
+table.data-table td{white-space:nowrap}
 table.data-table th{cursor:pointer;user-select:none;color:var(--muted);font-family:var(--font-mono);font-size:11px;
-  text-transform:uppercase;letter-spacing:.04em;position:sticky;top:0;background:var(--panel)}
+  text-transform:uppercase;letter-spacing:.04em;position:sticky;top:0;background:var(--panel);
+  white-space:normal;max-width:110px;vertical-align:bottom}
 table.data-table th:hover{color:var(--ink)}
 table.data-table th.sorted-asc::after{content:" ▴"}
 table.data-table th.sorted-desc::after{content:" ▾"}
