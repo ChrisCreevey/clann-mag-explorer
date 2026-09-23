@@ -68,6 +68,15 @@ test/                          Zero-dependency test harness
 node test/run.js
 ```
 
+## Funding
+
+Part of **HoloR-Tools** from the [HoloRuminant](https://holoruminant.eu/) project. This tool was
+developed with financial support from the European Union's Horizon 2020 research and innovation
+programme under grant agreement N° 101000213-HoloRuminant.
+
+This publication reflects the views only of the author, and not the European Commission (EC); the
+EC is not liable for any use that may be made of the information contained herein.
+
 ## Licence
 
 GPL-2.0, developed by [CreeveyLab](https://www.creeveylab.org/).
